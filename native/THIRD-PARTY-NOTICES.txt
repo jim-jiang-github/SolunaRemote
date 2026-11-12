@@ -1,0 +1,22 @@
+SolunaRemote native player
+
+The native/src source is licensed under GPL-3.0-or-later.
+moonlight-common-c is pinned to d5b38a3ac63927a11bebd8337df024f11eba34d5,
+including the ENet and nanors revisions recorded by that commit.
+https://github.com/moonlight-stream/moonlight-common-c
+
+The vcpkg manifest fixes dependency versions through registry baseline
+177e8175121536d414f405ed8b3099b325a42638.
+FFmpeg, SDL2, Opus, OpenSSL and nlohmann-json license/copyright notices
+are copied into this directory by the build script.
+
+Windows packages also contain the Microsoft Visual C++ redistributable
+runtime DLLs from the installed Visual Studio redistributable directory,
+under the applicable Microsoft redistribution terms:
+https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files
+
+When distributing this native binary, preserve all notices and provide
+complete corresponding source and build scripts as required by the
+applicable GPL/LGPL and other dependency licenses. License notices alone
+are not a replacement for the corresponding-source obligation.
+This project does not bundle Qt or Sunshine.

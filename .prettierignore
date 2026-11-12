@@ -1,0 +1,9 @@
+node_modules/
+release/
+test-results/
+playwright-report/
+native/.tools/
+native/build/
+native/bin/
+host/bin/
+package-lock.json

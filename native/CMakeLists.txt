@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.24)
+project(soluna-stream VERSION 0.4.0 LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+include(FetchContent)
+FetchContent_Declare(moonlight
+  GIT_REPOSITORY https://github.com/moonlight-stream/moonlight-common-c.git
+  GIT_TAG d5b38a3ac63927a11bebd8337df024f11eba34d5
+  GIT_SHALLOW FALSE
+  GIT_SUBMODULES_RECURSE TRUE)
+FetchContent_MakeAvailable(moonlight)
+find_package(SDL2 CONFIG REQUIRED)
+find_package(FFMPEG REQUIRED)
+find_package(Opus CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(soluna-stream src/main.cpp)
+target_include_directories(soluna-stream PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_compile_definitions(soluna-stream PRIVATE SDL_MAIN_HANDLED NOMINMAX)
+target_link_libraries(soluna-stream PRIVATE moonlight-common-c SDL2::SDL2 Opus::opus
+  OpenSSL::Crypto nlohmann_json::nlohmann_json Threads::Threads ${FFMPEG_LIBRARIES})
+if(WIN32)
+  target_link_libraries(soluna-stream PRIVATE gdi32 user32)
+endif()
+if(MSVC)
+  target_compile_options(soluna-stream PRIVATE /W4 /utf-8 /permissive-)
+  target_link_options(soluna-stream PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
+else()
+  target_compile_options(soluna-stream PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+install(TARGETS soluna-stream RUNTIME DESTINATION .)

@@ -147,3 +147,13 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Local desktop builds and runtime engines
+release/
+test-results/
+playwright-report/
+native/.tools/
+native/build/
+native/bin/
+host/bin/
+/vm-ssh-setup

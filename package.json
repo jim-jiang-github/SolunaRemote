@@ -1,0 +1,75 @@
+{
+  "name": "solunaremote",
+  "version": "0.4.0",
+  "description": "LAN-only Electron remote desktop with integrated Sunshine host and moonlight-common-c client",
+  "private": true,
+  "main": "app/main.cjs",
+  "author": "Jim Jiang",
+  "scripts": {
+    "start": "electron .",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
+    "prepare:host": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-host.ps1",
+    "test:native": "node tests/native-smoke.cjs",
+    "prepack": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
+    "predist": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "test": "node --test tests/unit/*.test.cjs",
+    "pretest:e2e": "node -e \"require('electron')\"",
+    "test:e2e": "playwright test",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "bonjour-service": "1.4.4",
+    "fast-xml-parser": "5.12.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0",
+    "eslint": "^10.0.0",
+    "prettier": "^3.0.0"
+  },
+  "build": {
+    "appId": "local.solunaremote.desktop",
+    "productName": "SolunaRemote",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "app/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "native/bin",
+        "to": "native",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "host/bin",
+        "to": "host",
+        "filter": [
+          "**/*",
+          "!config/**/*"
+        ]
+      },
+      {
+        "from": "app/host-firewall.ps1",
+        "to": "host-tools/host-firewall.ps1"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "signExecutable": false
+    },
+    "portable": {
+      "artifactName": "SolunaRemote-${version}-windows-${arch}.${ext}"
+    }
+  }
+}

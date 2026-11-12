@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="680" viewBox="0 0 1400 680" fill="none">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1400" y2="680" gradientUnits="userSpaceOnUse"><stop stop-color="#b9dbe5"/><stop offset=".5" stop-color="#87b8d7"/><stop offset="1" stop-color="#cadce9"/></linearGradient>
+    <linearGradient id="ribbon1" x1="280" y1="180" x2="1010" y2="670" gradientUnits="userSpaceOnUse"><stop stop-color="#a0e6f4"/><stop offset=".35" stop-color="#4fa5ef"/><stop offset=".7" stop-color="#3260dd"/><stop offset="1" stop-color="#233b9e"/></linearGradient>
+    <linearGradient id="ribbon2" x1="350" y1="80" x2="1100" y2="540" gradientUnits="userSpaceOnUse"><stop stop-color="#b1edfa"/><stop offset=".32" stop-color="#68b8fb"/><stop offset=".7" stop-color="#4779ee"/><stop offset="1" stop-color="#2750c0"/></linearGradient>
+    <linearGradient id="ribbon3" x1="1050" y1="200" x2="450" y2="650" gradientUnits="userSpaceOnUse"><stop stop-color="#aeecf5"/><stop offset=".4" stop-color="#6ac5e5"/><stop offset="1" stop-color="#3d7dcc"/></linearGradient>
+    <linearGradient id="highlight"><stop stop-color="#e0f9ff" stop-opacity=".8"/><stop offset="1" stop-color="#bddcff" stop-opacity="0"/></linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%"><feGaussianBlur stdDeviation="30"/></filter>
+  </defs>
+  <path fill="url(#sky)" d="M0 0h1400v680H0z"/>
+  <ellipse cx="772" cy="611" rx="371" ry="80" fill="#204788" opacity=".18" filter="url(#shadow)"/>
+  <path d="M295 674C419 528 439 407 570 274 665 177 792 94 925 122c125 26 132 124 69 210-90 122-364 182-392 348H295Z" fill="url(#ribbon1)"/>
+  <path d="M404 680c97-181 165-239 359-321 106-45 232-83 246-146 13-59-43-91-109-86 159-30 255 83 165 195-91 113-335 140-424 358H404Z" fill="url(#ribbon2)"/>
+  <path d="M550 680c93-186 256-208 377-307 88-71 127-146 57-210 122 67 133 146 16 254C884 523 784 578 764 680H550Z" fill="url(#ribbon1)"/>
+  <path d="M693 680c89-143 251-165 346-254 100-94 36-159-47-138 115-61 248 27 182 148-60 109-222 129-247 244H693Z" fill="url(#ribbon3)"/>
+  <path d="M1009 214c-16 65-147 104-247 148C571 447 506 503 406 680" stroke="url(#highlight)" stroke-width="3"/>
+  <path d="M981 163c73 65 34 139-55 213-124 102-283 121-375 304" stroke="#bae5ff" stroke-opacity=".6" stroke-width="2"/>
+  <path d="M991 289c86-24 150 43 47 140-95 88-257 112-344 251" stroke="#d3f6ff" stroke-opacity=".65" stroke-width="2"/>
+  <path d="M316 655c129-140 151-262 267-381 83-84 182-157 290-151" stroke="#c3edff" stroke-opacity=".35" stroke-width="2"/>
+</svg>
