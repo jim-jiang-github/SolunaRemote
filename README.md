@@ -1,6 +1,6 @@
 # SolunaRemote
 
-基于 Electron 的内网远程桌面入口，搭配
+基于 Tauri / WebView2 的内网远程桌面入口，搭配
 [Sunshine](https://github.com/SunshineStream/Sunshine) 和
 [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) 使用。
 
@@ -8,7 +8,8 @@ v0.4 是同一个程序里的服务端与客户端，**无需单独安装 Sunshi
 用户仅输入 **12 位设备码 + 访问密码**，不展示、不要求输入四位配对码。
 「本机共享」启动随包 Sunshine 子进程，自动完成底层协议授权，退出即停止，不注册系统服务、
 不安装驱动。客户端使用自行编译的 **soluna-stream** 原生进程，无需外部客户端：
-Electron 管理配对与应用；moonlight-common-c 处理 GameStream；FFmpeg 解码，SDL2
+Tauri/WebView2 显示界面，随包 Node.js 后端复用现有配对与应用逻辑；
+moonlight-common-c 处理 GameStream；FFmpeg 解码，SDL2
 负责独立窗口、音频输出与键鼠，Opus 解码双声道音频。
 
 采用浅色双栏、设备详情、桌面入口和快速启动布局，品牌、图标组合和桌面插画为本项目原创，不包含网易 UU 的标识、壁纸或其他素材。原来的浏览器设备清单原型已替换为桌面应用。
@@ -23,7 +24,8 @@ Electron 管理配对与应用；moonlight-common-c 处理 GameStream；FFmpeg �
 证书或访问密码。两端都应使用本版本，并重新设置共享密码、授权控制端内网地址；
 新品牌的密码派生标识和发现服务与旧测试版本不互通。原目录及原配置保留不动。
 
-需要支持当前 Electron / ESLint 工具链的 Node.js（推荐 Node.js 24 LTS；本次使用 Node.js 26）。
+源码开发需要 Node.js（推荐 Node.js 24 LTS）、Rust stable、Visual Studio C++ Build Tools
+和 WebView2 Runtime。Tauri 窗口使用系统 WebView2；随包 Node.js 仅作为不向界面开放权限的本地后端。
 
 ```powershell
 npm ci
@@ -32,7 +34,11 @@ npm run prepare:host
 npm start
 ```
 
-应用无需前端开发服务器或云端账号。直接在普通浏览器打开渲染页不会获得文件、网络或进程权限，必须使用 Electron 启动。
+`npm start` 启动 Tauri 开发版；`npm run dist` 生成 Tauri NSIS 安装包。
+如需对照旧 Electron 构建，可运行 `npm run start:electron` 或 `npm run dist:electron`。
+这次迁移替换了桌面壳和 IPC，设备、配对、TLS 与主机逻辑仍由 Node sidecar 执行；
+因此性能对比反映 Electron/Chromium 与 Tauri/WebView2 壳的差异，不代表后端已改写为 Rust。
+应用无需前端开发服务器或云端账号。直接在普通浏览器打开渲染页不会获得桌面桥接权限。
 
 ```powershell
 npm test
@@ -41,8 +47,10 @@ npm run format:check
 npm run test:e2e
 npm run test:native
 node tests\native-ui.cjs
+npm run benchmark:desktop
+npm run dist:tauri
+npm run dist:electron
 npm run pack
-npm run dist
 node tests\packaged-smoke.cjs
 node tests\packaged-smoke.cjs release\SolunaRemote-0.4.0-windows-x64.exe --portable
 ```
@@ -52,12 +60,14 @@ node tests\packaged-smoke.cjs release\SolunaRemote-0.4.0-windows-x64.exe --porta
 `native\bin\soluna-stream.exe`、运行库及许可文本；不安装 Sunshine，不修改防火墙。
 依赖构建可能耗时较长。可设置 `VCPKG_ROOT` 复用已有 vcpkg。
 
-`pack` 生成 `release\win-unpacked\SolunaRemote.exe`，`dist` 生成 Windows 便携包，
-两者包含 `native\bin` 客户端与 `host\bin` 的官方 Sunshine 便携引擎。
+`dist:tauri` 生成 `src-tauri\target\release\bundle\nsis` 下的安装包，随包带有
+Node.js 后端运行时、原生客户端和 Sunshine 引擎；用户数据仍存于 `%APPDATA%\SolunaRemote`。
+`dist:electron` 生成 `release\SolunaRemote-0.4.0-windows-x64.exe` 便携包，供性能对照。
+`pack` 保留旧 Electron 解包构建流程。
 `prepare:host` 固定版本与官方 SHA256，打包前检查引擎；不运行上游安装程序。
 Sunshine 官方二进制包含静态 Qt 托盘支持，本程序关闭该托盘；因此「客户端无 Qt」
 不代表官方服务端二进制内部也完全没有 Qt。用户只使用 SolunaRemote 界面。
-构建未做代码签名，Windows 可能提示未知发布者。`packaged-smoke` 使用独立临时目录。
+构建未做代码签名，Windows 可能提示未知发布者。Electron `packaged-smoke` 使用独立临时目录。
 
 macOS 源码构建入口为 `native\CMakeLists.txt`，需要 CMake、SDL2、FFmpeg、Opus、OpenSSL、
 nlohmann-json（建议同一 vcpkg 工具链）；配置、构建后将可执行文件及动态库置于 `native\bin`。
@@ -65,7 +75,7 @@ macOS 的 VideoToolbox、窗口、权限、签名和分发尚未实测，不能�
 
 ## Windows 虚拟机 SSH 部署入口
 
-将项目中的 **`vm-ssh-setup` 整个文件夹复制到 Windows 11 测试虚拟机**（建议放在桌面），双击里面的 **`START.bat`**，在 Windows 管理员权限提示中选择“是”。不要在宿主机运行。文件夹包含 BAT 入口、自动提权启动脚本、SSH 配置脚本、公钥和 `settings.json`，不含私钥，也不需要 Node.js。
+将项目中的 **`vm-ssh-setup` 整个文件夹复制到 Windows 11 测试虚拟机**（建议放在桌面），双击里面的 **`START.bat`**，在 Windows 管理员权限提示中选择“是”。不要在宿主机运行。文件夹包含 BAT 入口、自动提权启动脚本、SSH 配置脚本、公钥和 `settings.json`，不含私钥，也不需要 Node.js。启动脚本会安装 `solunaremote-vm-v2.pub`；与它匹配的私钥应留在连接端。
 
 完成后窗口会保留结果；同目录的 `setup.log` 记录本次执行详情，包含用户名、虚拟机 IP 和主机密钥指纹。失败或取消权限授权会明确报错，不会显示成功。若需要另一管理员账号授权，SSH 用户是实际批准提权的本地管理员账号。
 
@@ -186,7 +196,7 @@ Windows 会话窗口使用紧凑浅色顶栏，显示远端设备名、桌面标
 
 ## 已实现
 
-- 隔离的 Electron 主进程、沙箱 preload 和受限 IPC；无 Node.js 渲染器权限。
+- Tauri 原生窗口和受限命令桥接；Node 后端作为独立进程运行，渲染器没有 Node.js 权限。
 - 手动添加 / 移除设备、收藏、搜索、按设备保存的快速启动。
 - 原子写入的设备与串流配置持久化；损坏文件保留并明确报错，不静默清空。
 - mDNS 查找 Sunshine、手动刷新和每 15 秒的可见窗口状态检测。
@@ -208,7 +218,7 @@ Windows 默认为 `%APPDATA%\SolunaRemote\devices.json`。
 单元测试覆盖内网、DNS、持久化、原生生命周期、内部挑战签名、固定证书及 launch/resume；
 访问密码测试使用真实 TLS-PSK 握手，并在 Node/OpenSSL 与 Electron/BoringSSL 中分别运行，
 包括错误密码拒绝、正确密码成功和敏感信息不进入状态快照。协议测试仍不等于真实 Sunshine。
-Electron UI 使用真实窗口和独立临时目录，明确模拟设备码发现、密码认证、控制 API 与原生 JSON 播放器；
+Electron UI 测试使用真实窗口和独立临时目录，明确模拟设备码发现、密码认证、控制 API 与原生 JSON 播放器；
 覆盖设备码入口、错误密码阻止启动、成功连接/停止、状态恢复、本机密码/共享开关、设置持久化与移除。
 
 UI 测试不等于真实 Sunshine / Moonlight 串流验证。真实双机的 PIN 授权、画面/声音、硬件编解码、键鼠、UDP 连接质量及平台打包签名需在安装引擎后实测。测试截图输出到 `test-results`，不写入应用数据目录。

@@ -6,4 +6,7 @@ native/.tools/
 native/build/
 native/bin/
 host/bin/
+src-tauri/gen/
+src-tauri/resources/
+src-tauri/target/
 package-lock.json

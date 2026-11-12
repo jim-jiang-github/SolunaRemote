@@ -1,5 +1,5 @@
 /* global window, document */
-(() => {
+(async () => {
   const content = document.querySelector("#content");
   let state;
   let route = "devices";
@@ -509,8 +509,9 @@
       }
     });
 
+  if (!window.lan && window.__lanBridgeReady) await window.__lanBridgeReady;
   if (!window.lan) {
-    content.innerHTML = `<div class="empty-state"><h2>请使用 Electron 启动 SolunaRemote</h2><p>在项目目录运行 npm start。浏览器中不开放设备探测、文件访问或进程启动权限。</p></div>`;
+    content.innerHTML = `<div class="empty-state"><h2>请使用 SolunaRemote 桌面应用</h2><p>在项目目录运行 npm start。浏览器中不开放设备探测、文件访问或进程启动权限。</p></div>`;
     return;
   }
   document.querySelector("#connect-dialog").addEventListener("close", () => {

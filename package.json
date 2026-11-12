@@ -1,15 +1,19 @@
 {
   "name": "solunaremote",
   "version": "0.4.0",
-  "description": "LAN-only Electron remote desktop with integrated Sunshine host and moonlight-common-c client",
+  "description": "LAN-only Tauri desktop remote with integrated Sunshine host and moonlight-common-c client",
   "private": true,
   "main": "app/main.cjs",
   "author": "Jim Jiang",
   "scripts": {
-    "start": "electron .",
+    "start": "npm run start:tauri",
+    "start:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri.ps1 -Mode dev",
+    "start:electron": "electron .",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
     "prepare:host": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-host.ps1",
     "test:native": "node tests/native-smoke.cjs",
+    "test:tauri": "node tests/tauri-smoke.cjs",
+    "benchmark:desktop": "node tests/desktop-compare.cjs",
     "prepack": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
     "predist": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
     "format": "prettier --write .",
@@ -19,7 +23,9 @@
     "pretest:e2e": "node -e \"require('electron')\"",
     "test:e2e": "playwright test",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win portable"
+    "dist": "npm run dist:tauri",
+    "dist:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri.ps1 -Mode build",
+    "dist:electron": "electron-builder --win portable"
   },
   "dependencies": {
     "bonjour-service": "1.4.4",

@@ -9,6 +9,8 @@ module.exports = [
       "native/build/**",
       "native/bin/**",
       "host/bin/**",
+      "src-tauri/resources/**",
+      "src-tauri/target/**",
     ],
   },
   {

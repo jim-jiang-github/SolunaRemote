@@ -13,6 +13,9 @@ const { isPrivateIPv4 } = require("./validation.cjs");
 function findHostExecutable() {
   return (
     [
+      ...(process.env.SOLUNA_RESOURCES_DIR
+        ? [path.join(process.env.SOLUNA_RESOURCES_DIR, "host", "sunshine.exe")]
+        : []),
       ...(process.resourcesPath
         ? [path.join(process.resourcesPath, "host", "sunshine.exe")]
         : []),

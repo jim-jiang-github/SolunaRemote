@@ -157,3 +157,6 @@ native/build/
 native/bin/
 host/bin/
 /vm-ssh-setup
+/src-tauri/resources/
+/src-tauri/target/
+/src-tauri/gen/

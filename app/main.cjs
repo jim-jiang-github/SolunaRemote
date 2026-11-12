@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const electron = process.versions.electron ? require("electron") : null;
+const { app, BrowserWindow, ipcMain, dialog, shell } = electron ?? {};
 const path = require("node:path");
 const os = require("node:os");
 const { pathToFileURL } = require("node:url");
@@ -20,50 +21,63 @@ const links = Object.freeze({
 });
 
 async function bootstrap(options = {}) {
-  app.setName("SolunaRemote");
+  const headless = options.headless === true;
+  if (!headless) app.setName("SolunaRemote");
   const userDataDir =
-    options.userDataDir || app.commandLine.getSwitchValue("user-data-dir");
+    options.userDataDir ||
+    (headless ? "" : app.commandLine.getSwitchValue("user-data-dir"));
+  if (headless && !path.isAbsolute(userDataDir))
+    throw new Error("用户数据目录必须为绝对路径。");
   if (userDataDir) {
     if (!path.isAbsolute(userDataDir))
       throw new Error("用户数据目录必须为绝对路径。");
-    app.setPath("userData", userDataDir);
+    if (!headless) app.setPath("userData", userDataDir);
   }
-  if (!options.allowMultiple && !app.requestSingleInstanceLock()) {
+  if (!headless && !options.allowMultiple && !app.requestSingleInstanceLock()) {
     app.quit();
     return;
   }
-  await app.whenReady();
+  if (!headless) await app.whenReady();
   let store;
   try {
-    store = new Store(app.getPath("userData"));
+    store = new Store(headless ? userDataDir : app.getPath("userData"));
   } catch (error) {
-    dialog.showErrorBox("SolunaRemote 无法启动", error.message);
-    app.quit();
-    return;
+    if (!headless) {
+      dialog.showErrorBox("SolunaRemote 无法启动", error.message);
+      app.quit();
+      return;
+    }
+    throw error;
   }
+  const dataDirectory = headless ? userDataDir : app.getPath("userData");
   const engines =
     options.engines ??
     new NativeEngine({
-      directory: path.join(app.getPath("userData"), "identity"),
+      directory: path.join(dataDirectory, "identity"),
     });
   const discoverHosts = options.discover ?? discover;
   const host =
     options.host ??
     new HostManager({
-      directory: path.join(app.getPath("userData"), "host"),
+      directory: path.join(dataDirectory, "host"),
     });
   const access =
     options.access ??
     new AccessServer({
-      directory: path.join(app.getPath("userData"), "access"),
+      directory: path.join(dataDirectory, "access"),
       host,
       onChange: () => {
-        if (window) publish();
+        if (window || headless) publish();
       },
     });
   await access.init();
   const openExternal =
-    options.openExternal ?? ((url) => shell.openExternal(url));
+    options.openExternal ??
+    (headless
+      ? async () => {
+          throw new Error("请通过 Tauri 桌面命令打开外部链接。");
+        }
+      : (url) => shell.openExternal(url));
   const status = new Map();
   let window;
   let discovering = false;
@@ -72,6 +86,7 @@ async function bootstrap(options = {}) {
 
   function send(channel, data) {
     if (window && !window.isDestroyed()) window.webContents.send(channel, data);
+    else if (headless) options.emit?.(channel, data);
   }
 
   function snapshot() {
@@ -105,7 +120,7 @@ async function bootstrap(options = {}) {
           .filter((entry) => entry.family === "IPv4" && !entry.internal)
           .map((entry) => entry.address),
       },
-      version: app.getVersion(),
+      version: headless ? options.version : app.getVersion(),
     };
   }
 
@@ -263,7 +278,15 @@ async function bootstrap(options = {}) {
       store.settings(input);
       publish();
     },
+    validateNativePath: (input) =>
+      validateNativeExecutable(typeof input === "string" ? input : input?.path),
     pickNative: async () => {
+      if (headless) {
+        if (!options.pickNative)
+          throw new Error("请通过 Tauri 文件选择器选择原生引擎。");
+        const selectedPath = await options.pickNative();
+        return selectedPath ? validateNativeExecutable(selectedPath) : null;
+      }
       const result = await dialog.showOpenDialog(window, {
         title: "选择 soluna-stream 原生引擎",
         properties: ["openFile"],
@@ -304,16 +327,24 @@ async function bootstrap(options = {}) {
     },
     cancel: (id) => engines.cancel(id),
     openSunshine: async (id) => {
+      await openExternal(await methods.sunshineUrl(id));
+    },
+    sunshineUrl: async (id) => {
       const target = await resolveLan(
         id ? store.device(id).address : "127.0.0.1",
       );
-      await openExternal(`https://${target.ip}:${target.port + 1}/`);
+      return `https://${target.ip}:${target.port + 1}/`;
     },
     openLink: async (key) => {
       if (!Object.hasOwn(links, key)) throw new Error("不支持的外部链接。");
       await openExternal(links[key]);
     },
     window: (action) => {
+      if (headless) {
+        if (!["minimize", "maximize", "close"].includes(action))
+          throw new Error("无效的窗口操作。");
+        return options.windowAction?.(action);
+      }
       if (action === "minimize") window.minimize();
       else if (action === "maximize")
         window.isMaximized() ? window.unmaximize() : window.maximize();
@@ -322,19 +353,21 @@ async function bootstrap(options = {}) {
     },
   };
 
-  ipcMain.handle("lan:call", async (event, method, input) => {
-    if (
-      event.senderFrame?.url !== rendererUrl ||
-      event.sender !== window?.webContents ||
-      !Object.hasOwn(methods, method)
-    )
-      return { ok: false, error: "不允许的请求。" };
-    try {
-      return { ok: true, value: await methods[method](input) };
-    } catch (error) {
-      return { ok: false, error: error.message || "操作失败，请重试。" };
-    }
-  });
+  if (!headless) {
+    ipcMain.handle("lan:call", async (event, method, input) => {
+      if (
+        event.senderFrame?.url !== rendererUrl ||
+        event.sender !== window?.webContents ||
+        !Object.hasOwn(methods, method)
+      )
+        return { ok: false, error: "不允许的请求。" };
+      try {
+        return { ok: true, value: await methods[method](input) };
+      } catch (error) {
+        return { ok: false, error: error.message || "操作失败，请重试。" };
+      }
+    });
+  }
   engines.on("change", (event) => {
     publish();
     send("lan:engine", event);
@@ -345,9 +378,20 @@ async function bootstrap(options = {}) {
       access
         .stop()
         .catch((error) =>
-          dialog.showErrorBox("访问入口关闭失败", error.message),
+          headless
+            ? options.onError?.(error)
+            : dialog.showErrorBox("访问入口关闭失败", error.message),
         );
   });
+
+  async function shutdown() {
+    methods.cancelConnect();
+    engines.dispose();
+    await access.stop();
+    await host.stop();
+  }
+
+  if (headless) return { store, engines, host, methods, shutdown };
 
   function createWindow() {
     window = new BrowserWindow({
@@ -413,11 +457,7 @@ async function bootstrap(options = {}) {
   app.on("before-quit", (event) => {
     if (quitting) return;
     event.preventDefault();
-    methods.cancelConnect();
-    engines.dispose();
-    access
-      .stop()
-      .then(() => host.stop())
+    shutdown()
       .then(() => {
         quitting = true;
         app.quit();
@@ -429,7 +469,7 @@ async function bootstrap(options = {}) {
   return { store, engines, host, window, methods };
 }
 
-if (require.main === module)
+if (electron && require.main === module)
   bootstrap().catch((error) => {
     dialog.showErrorBox("SolunaRemote 启动失败", error.message);
     app.quit();

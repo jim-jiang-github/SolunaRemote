@@ -1,0 +1,15 @@
+[package]
+name = "solunaremote"
+version = "0.4.0"
+description = "SolunaRemote desktop app"
+authors = ["Jim Jiang"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rfd = "0.15"
+serde_json = "1"
+tauri = { version = "2", features = [] }
+url = "2"

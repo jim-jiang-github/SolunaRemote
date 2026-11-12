@@ -7,7 +7,7 @@ const { test } = require("node:test");
 
 const bundle = path.resolve("vm-ssh-setup");
 const script = path.join(bundle, "Enable-VmSsh.ps1");
-const publicKey = path.join(bundle, "vm-deploy.pub");
+const publicKey = path.join(bundle, "solunaremote-vm-v2.pub");
 const windowsOnly = { skip: process.platform !== "win32" };
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
 
@@ -18,6 +18,7 @@ test("VM SSH bundle contains all setup resources and no private key", () => {
     "START.bat",
     "Start-Setup.ps1",
     "settings.json",
+    "solunaremote-vm-v2.pub",
     "vm-deploy.pub",
   ];
   const actual = fs.readdirSync(bundle).sort();
@@ -321,7 +322,7 @@ test(
         fs.readdirSync(bundle).sort(),
       );
 
-      fs.rmSync(path.join(directory, "vm-deploy.pub"));
+      fs.rmSync(path.join(directory, "solunaremote-vm-v2.pub"));
       const failure = powershell(
         `& ${quote(path.join(directory, "Start-Setup.ps1"))} -WhatIf`,
       );
@@ -334,7 +335,7 @@ test(
 );
 
 test(
-  "VM SSH preview accepts the deployment public key without elevation",
+  "VM SSH preview accepts the configured public key without elevation",
   windowsOnly,
   () => {
     const result = preview("172.22.96.1");

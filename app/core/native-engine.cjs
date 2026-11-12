@@ -14,6 +14,9 @@ function findNativeExecutable() {
     process.platform === "win32" ? "soluna-stream.exe" : "soluna-stream";
   return (
     [
+      ...(process.env.SOLUNA_RESOURCES_DIR
+        ? [path.join(process.env.SOLUNA_RESOURCES_DIR, "native", name)]
+        : []),
       ...(process.resourcesPath
         ? [path.join(process.resourcesPath, "native", name)]
         : []),
