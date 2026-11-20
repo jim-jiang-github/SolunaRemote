@@ -1,4 +1,4 @@
-use crate::process::background_command;
+use crate::{network::read_framed_response, process::background_command};
 use openssl::{
     ssl::{SslConnector, SslMethod, SslVerifyMode},
     x509::X509,
@@ -7,7 +7,7 @@ use ring::rand::SecureRandom;
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Stdio},
@@ -22,6 +22,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct HostRuntime {
     directory: PathBuf,
     executable: PathBuf,
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    embedded_assets_dir: Option<PathBuf>,
     child: Option<Child>,
     phase: String,
     error: Option<String>,
@@ -34,12 +36,21 @@ impl HostRuntime {
         Self {
             directory,
             executable,
+            #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+            embedded_assets_dir: None,
             child: None,
             phase: "stopped".into(),
             error: None,
             certificate: None,
             authorization: None,
         }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    pub fn new_embedded(directory: PathBuf, executable: PathBuf, assets_dir: PathBuf) -> Self {
+        let mut host = Self::new(directory, executable);
+        host.embedded_assets_dir = Some(assets_dir);
+        host
     }
 
     pub fn phase(&self) -> &str {
@@ -51,7 +62,28 @@ impl HostRuntime {
     }
 
     pub fn available(&self) -> bool {
-        self.executable.is_file()
+        if !self.executable.is_file() {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let Some(contents) = self.executable.parent().and_then(Path::parent) else {
+                return false;
+            };
+            let assets = contents.join("Resources").join("assets");
+            if !assets.join("desktop.png").is_file() || !assets.join("box.png").is_file() {
+                return false;
+            }
+        }
+        #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+        if let Some(directory) = &self.embedded_assets_dir {
+            let assets = directory.join("assets");
+            return crate::embedded::component_exists(&self.executable, crate::embedded::HOST_DLL)
+                && assets.join("shaders").join("directx").is_dir()
+                && assets.join("desktop.png").is_file()
+                && assets.join("box.png").is_file();
+        }
+        true
     }
 
     pub fn start(&mut self) -> Result<(), String> {
@@ -125,13 +157,22 @@ impl HostRuntime {
             .try_clone()
             .map_err(|error| format!("无法准备 Sunshine 日志：{error}"))?;
         let mut command = background_command(&self.executable);
+        #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+        if self.embedded_assets_dir.is_some() {
+            command.arg("--sunshine-host");
+        }
+        let working_directory = self
+            .executable
+            .parent()
+            .ok_or_else(|| "Sunshine 程序路径无效。".to_string())?;
+        #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+        let working_directory = self
+            .embedded_assets_dir
+            .as_deref()
+            .unwrap_or(working_directory);
         command
             .arg(&config_path)
-            .current_dir(
-                self.executable
-                    .parent()
-                    .ok_or_else(|| "Sunshine 程序路径无效。".to_string())?,
-            )
+            .current_dir(working_directory)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
@@ -501,14 +542,7 @@ impl HostRuntime {
         )
         .and_then(|_| stream.write_all(&data))
         .map_err(|error| format!("发送 Sunshine 管理请求失败：{error}"))?;
-        let mut response = Vec::new();
-        stream
-            .take(1_048_577)
-            .read_to_end(&mut response)
-            .map_err(|error| format!("读取 Sunshine 管理响应失败：{error}"))?;
-        if response.len() > 1_048_576 {
-            return Err("Sunshine 管理响应超过大小限制。".into());
-        }
+        let response = read_framed_response(&mut stream)?;
         let split = response
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -616,6 +650,24 @@ mod tests {
     }
 
     #[test]
+    fn management_response_requires_complete_unambiguous_framing() {
+        for valid in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"[..],
+        ] {
+            assert_eq!(read_framed_response(&mut &valid[..]).unwrap(), valid);
+        }
+        for invalid in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{"[..],
+            &b"HTTP/1.1 200 OK\r\n\r\n"[..],
+        ] {
+            assert!(read_framed_response(&mut &invalid[..]).is_err());
+        }
+    }
+
+    #[test]
     fn host_runtime_reports_missing_executable_without_spawning() {
         let directory = std::env::temp_dir().join(format!(
             "solunaremote-host-runtime-{}",
@@ -624,6 +676,54 @@ mod tests {
         let mut host = HostRuntime::new(directory, PathBuf::from("missing-sunshine"));
         assert!(!host.available());
         assert!(host.start().is_err());
+        assert_eq!(host.phase(), "stopped");
+    }
+
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    #[test]
+    fn embedded_host_requires_assets() {
+        let host = HostRuntime::new_embedded(
+            std::env::temp_dir(),
+            std::env::current_exe().unwrap(),
+            std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()),
+        );
+        assert!(!host.available());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    #[test]
+    fn embedded_host_does_not_require_packaged_apps_json() {
+        let directory =
+            std::env::temp_dir().join(format!("solunaremote-host-assets-{}", uuid::Uuid::new_v4()));
+        let assets = directory.join("resources").join("assets");
+        fs::create_dir_all(assets.join("shaders").join("directx")).unwrap();
+        let executable = directory.join("solunaremote.exe");
+        fs::write(&executable, []).unwrap();
+        fs::write(directory.join(crate::embedded::HOST_DLL), []).unwrap();
+        fs::write(assets.join("desktop.png"), []).unwrap();
+        fs::write(assets.join("box.png"), []).unwrap();
+        let host = HostRuntime::new_embedded(
+            directory.join("data"),
+            executable,
+            directory.join("resources"),
+        );
+        assert!(host.available());
+        fs::remove_file(assets.join("desktop.png")).unwrap();
+        assert!(!host.available());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    #[test]
+    #[ignore = "starts a real Sunshine host and binds network ports"]
+    fn embedded_host_starts_and_stops() {
+        let executable = PathBuf::from(std::env::var_os("SOLUNA_TEST_EXECUTABLE").unwrap());
+        let assets = PathBuf::from(std::env::var_os("SOLUNA_TEST_ASSETS").unwrap());
+        let directory = PathBuf::from(std::env::var_os("SOLUNA_TEST_HOST_DIR").unwrap());
+        let mut host = HostRuntime::new_embedded(directory, executable, assets);
+        host.start().expect("embedded host should start");
+        assert_eq!(host.phase(), "running");
+        host.stop().expect("embedded host should stop");
         assert_eq!(host.phase(), "stopped");
     }
 }

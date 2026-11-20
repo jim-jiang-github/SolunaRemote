@@ -75,6 +75,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-direct.ps1 -Ou
 ```
 
 输出目录必须尚不存在，避免覆盖已有文件。
+
+实验性的 Windows 单 EXE、按需加载核心 DLL 的构建使用 MSYS2 UCRT64（含 GCC、CMake、Ninja、
+SDL2 及 Sunshine 的构建依赖）和 Rust GNU 主机工具链：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-embedded.ps1 -OutputDirectory release\SolunaRemote-embedded
+```
+
+该目录只有一个项目 EXE；`soluna-host.dll`、`soluna-stream.dll`、其他运行时 DLL、
+Sunshine 资源和许可证均需随目录保留。两个引擎在同一 EXE 的内部子进程中按需加载，
+不包含 Sunshine Web UI。此入口不改变现有 NSIS、MSIX 或 macOS 构建流程。
+主机应用列表保存在用户数据目录，不需要在发行目录中附带默认 `apps.json`；
+保留的桌面封面和默认封面用于兼容现有应用 ID 和客户端封面请求。
+
 Rust Release 配置启用体积优化。`prepare:host` 固定 Sunshine 版本与官方 SHA256，
 打包前检查引擎；不运行上游安装程序。
 Sunshine 官方二进制包含静态 Qt 托盘支持，本程序关闭该托盘；因此「客户端无 Qt」
@@ -147,23 +161,29 @@ MSIX 清单通过 `windows.firewallRules` 为本应用的 TCP 47991 / UDP 5353�
 解包后可运行 `node tests\packaged-smoke.cjs <解包目录>\SolunaRemote.exe --msix`，
 检查依赖、界面启动、后端商店构建标记和导航，但这不替代安装态测试。
 
-macOS 源码构建入口为 `native/CMakeLists.txt`，需要 CMake、SDL2、FFmpeg、Opus、OpenSSL、
-nlohmann-json 和 pkg-config。安装 Node.js 后可在 Mac 上运行 `npm run prepare:host:macos`
-下载并校验官方 Sunshine（Apple Silicon 或 Intel），再运行 `npm run start:tauri:macos`
+macOS 源码构建需要初始化 Sunshine 及其子模块，并安装 CMake、SDL2、FFmpeg、Opus、OpenSSL、
+nlohmann-json、pkg-config、Rust 和 Node.js。在 Mac 上运行 `npm run prepare:host:macos`
+从 `third-party/Sunshine` 编译精简主机，再运行 `npm run start:tauri:macos`
 启动 Tauri 开发版，或 `npm run dist:tauri:macos` 构建 DMG。Tauri 资源准备会构建并包含
-原生 `soluna-stream`，同时保留 Sunshine.app 的签名；首次运行会将 Sunshine 复制到当前用户的
-应用支持目录，并在启动前再次验证官方签名。
+原生 `soluna-stream`。主机编译阶段会生成临时的 Sunshine.app；资源准备仅提取其中的共享引擎二进制，
+并将引擎、依赖库和必要资源放入唯一的 `SolunaRemote.app`，不再释放或安装独立的 `Sunshine.app`。
+程序以编译时固定的归档哈希和辅助程序签名哈希校验随包资源。代码使用临时签名，不能将其当作官方签名或公证。
+DMG 构建会将客户端依赖的动态库复制进应用包，并对应用进行临时签名。
+构建使用 `host/build-macos-local` 和 `host/bin-macos-local`；脚本只复用自己创建的构建目录，不覆盖已有产物。
+
+从 macOS 15 或更新版本发起连接时，SolunaRemote 会在访问密码验证前检查到目标的本地网络权限。
+系统明确拒绝时，应用会自动打开“系统设置 > 隐私与安全性 > 本地网络”，连接表单也会保留手动打开设置的按钮。授权后重新连接即可。
 
 macOS 本机共享不强制开启系统防火墙；防火墙关闭时直接继续启动，不要求防火墙授权。
 若防火墙已开启，需在“系统设置 > 网络 > 防火墙”选项中允许
-Finder 定位到的 Sunshine.app 与 SolunaRemote.app。点击开启共享后，若检查未通过，应用会显示授权说明。
+Finder 定位到的 SolunaRemote.app 接受传入连接。点击开启共享后，若检查未通过，应用会显示授权说明。
 用户点击“打开防火墙设置”后自行操作，再点击“重新检查并开启共享”；只有检查通过才启动。
-定位按钮按需显示当前版本的两个应用，取消不会启动共享。应用不会代替用户开启防火墙或添加规则。
-开启共享前会提示用户为内置 Sunshine 授予辅助功能权限（部分 macOS 版本称为“设备控制和数据访问”），
-并提供权限设置和 Sunshine.app 定位入口；该提示不能验证 Sunshine 的授权状态，用户可以取消或继续。
+定位按钮只显示当前版本的 SolunaRemote.app，取消不会启动共享。应用不会代替用户开启防火墙或添加规则。
+开启共享前会检查辅助功能权限（部分 macOS 版本称为“设备控制和数据访问”）；未授权时会自动打开对应的系统设置。
+从应用打开辅助功能设置后，应用会在 5 分钟内复查授权。确认当前版本已获授权且没有运行中的共享或串流时，会自动重新打开；重新打开后再开启共享。
 开启共享时会提前请求屏幕录制权限，无需等待客户端连接；如果系统没有弹出提示，请在
-“隐私与安全性 > 屏幕录制”中为 SolunaRemote 授权。Sunshine 还需要辅助功能权限；
-这些权限必须由用户明确授予。Sunshine 的 macOS 支持仍属实验性，此入口用于测试，不代表
+“隐私与安全性 > 屏幕录制”中为 SolunaRemote 授权。相关权限必须由用户明确授予。
+Sunshine 的 macOS 支持仍属实验性，此入口用于测试，不代表
 macOS 已完成发行验收、代码签名、公证或 GitHub Actions 打包验证。
 
 ## Windows 虚拟机 SSH 部署入口

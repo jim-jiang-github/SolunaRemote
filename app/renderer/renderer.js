@@ -10,6 +10,8 @@
   let localPassword = "";
   let localPasswordVisible = false;
   let connecting = false;
+  let connectError = "";
+  let localNetworkDenied = false;
   let hostTogglePending = false;
   let removeId = null;
   let toastTimer;
@@ -218,7 +220,8 @@
           <label>伙伴设备 ID<input id="partner-code" name="code" required pattern="[0-9]{9}" maxlength="9" inputmode="numeric" autocomplete="off" placeholder="输入 9 位设备 ID" value="${escape(partnerCode)}" /></label>
           <label>设备访问密码<input id="partner-password" name="password" type="password" required maxlength="128" autocomplete="off" placeholder="输入对方设置的访问密码" value="${escape(partnerPassword)}" /></label>
           <button class="button primary" type="submit" ${disabled(connecting || !state.engines.nativeAvailable || !!state.session)}>${connecting ? "正在连接…" : "连接"}</button>
-          <p id="connect-error" class="form-error" role="alert"></p>
+          <p id="connect-error" class="form-error" role="alert">${escape(connectError)}</p>
+          ${localNetworkDenied ? `<div class="local-network-help">${button("打开本地网络设置", "local-network-settings", "secondary", "settings")}</div>` : ""}
         </form>
       </section>`;
   }
@@ -276,7 +279,7 @@
     const busy = ["starting", "stopping"].includes(h.phase);
     const macOS = state.platform === "macos";
     const macOSPermissions = macOS
-      ? `<div class="guide-step"><span class="step-number">03</span><div><h3>macOS 系统权限</h3><p>开启共享时会提前请求屏幕录制权限，不必等到对方连接。若系统未弹出提示，请在“隐私与安全性”中为 SolunaRemote 开启屏幕录制；Sunshine 需要辅助功能权限（部分版本称“设备控制和数据访问”）。若 macOS 防火墙已开启，需在防火墙选项中允许 Sunshine.app 与 SolunaRemote.app 接受传入连接；防火墙关闭时不要求授权，应用不会自动更改系统设置。</p><div class="button-row">${button("打开系统设置", "host-settings", "secondary", "settings")}${button("在 Finder 中显示 Sunshine.app", "host-reveal", "secondary")}${button("在 Finder 中显示 SolunaRemote", "host-reveal-soluna", "secondary")}</div></div></div>`
+      ? `<div class="guide-step"><span class="step-number">03</span><div><h3>macOS 系统权限</h3><p>开启共享时会提前请求屏幕录制权限，不必等到对方连接。若系统未弹出提示，请在“隐私与安全性”中为 SolunaRemote 开启屏幕录制和辅助功能（部分版本称“设备控制和数据访问”）。若 macOS 防火墙已开启，需在防火墙选项中允许 SolunaRemote.app 接受传入连接；内置共享引擎已包含在应用中。防火墙关闭时不要求授权，应用不会自动更改系统设置。</p><div class="button-row">${button("打开辅助功能设置", "host-accessibility-settings", "secondary", "settings")}${button("在 Finder 中显示 SolunaRemote", "host-reveal-soluna", "secondary")}</div></div></div>`
       : "";
     const labels = {
       stopped: "未共享",
@@ -289,7 +292,7 @@
       <div class="host-panel"><span class="host-icon">${icon("sun")}</span><div><h2>${escape(state.local.hostname)} · ${labels[h.phase] || "未知状态"}</h2><p>${h.available ? "内置 Sunshine 服务端 · 应用管理生命周期" : "缺少内置共享引擎，请重新准备完整发行包"}</p></div>${button(running ? "停止本机共享" : "开启本机共享", running ? "host-stop" : "host-start", running ? "secondary" : "primary", "sun", disabled(busy || !h.available))}</div>
       ${h.error || h.access.error ? `<div class="device-notice warning">${icon("help")}<span>${escape(h.error || h.access.error)}</span></div>` : ""}
       <div class="host-panel"><div><h2>本机设备码：<span id="host-device-code">${escape(h.access.code)}</span></h2><p>${h.access.passwordConfigured ? "访问密码已设置，不在界面回显。" : "先设置访问密码，再开启共享。"}</p></div></div>
-      <div id="host-controls"><div class="guide-step"><span class="step-number">01</span><div><h3>开启共享</h3><p>${macOS ? "若系统防火墙已开启，请允许 Sunshine.app 与 SolunaRemote.app 入站连接；应用不会代替你修改系统设置。" : "首次开启可能需要系统管理员授权，以便为本地子网配置必要的防火墙规则。"}</p></div></div>
+      <div id="host-controls"><div class="guide-step"><span class="step-number">01</span><div><h3>开启共享</h3><p>${macOS ? "若系统防火墙已开启，请允许 SolunaRemote.app 入站连接；应用不会代替你修改系统设置。" : "首次开启可能需要系统管理员授权，以便为本地子网配置必要的防火墙规则。"}</p></div></div>
       <div class="guide-step"><span class="step-number">02</span><div><h3>设置访问密码</h3><p>另一台电脑输入本机设备 ID 与此密码即可连接。密码无需复杂度组合，非空即可（最多 128 个字符）。应用会自动使用系统默认网络；默认网络变化后，重新保存访问密码即可。修改密码前须停止共享；下次开启共享会撤销以前的客户端授权。</p><form id="host-password-form"><label>本机访问密码<input name="password" type="password" required maxlength="128" autocomplete="new-password" ${disabled(running || busy)} /></label><button class="button secondary" type="submit" ${disabled(running || busy)}>保存访问密码</button></form></div></div>${macOSPermissions}</div>
       <p class="scope-note">共享默认关闭，不注册系统服务、不安装驱动。关闭应用会停止本机共享；配对与配置保存在当前用户的数据目录中。UPnP 已禁用，管理接口仅允许本机访问。仅在有权控制的设备上使用。</p>`;
   }
@@ -336,6 +339,22 @@
     errorField.textContent = "";
     renderContent();
     try {
+      if (state.platform === "macos") {
+        const accessibilityAllowed = await window.lan.call(
+          "hostAccessibilityStatus",
+        );
+        if (retrying && !dialog.open) return;
+        if (typeof accessibilityAllowed !== "boolean")
+          throw new Error("无法读取辅助功能权限状态，请稍后重试。");
+        if (!accessibilityAllowed) {
+          if (dialog.open) dialog.close();
+          await window.lan.call("openHostAccessibilitySettings");
+          notify(
+            "请允许当前版本的 SolunaRemote。检测到授权后，应用会自动重新打开。",
+          );
+          return;
+        }
+      }
       if (
         ["macos", "windows"].includes(state.platform) &&
         !state.host.firewallManagedByPackage
@@ -359,7 +378,7 @@
             }
           } else {
             errorField.textContent =
-              "尚未检测到两个应用的入站授权。请在防火墙选项中允许传入连接后重新检查。";
+              "尚未检测到 SolunaRemote 的入站授权。请在防火墙选项中允许传入连接后重新检查。";
             if (!dialog.open) dialog.showModal();
             return;
           }
@@ -379,16 +398,6 @@
       hostTogglePending = false;
       recheck.disabled = false;
       renderContent();
-    }
-  }
-
-  function requestHostStart() {
-    if (hostTogglePending) return;
-    if (state.platform !== "macos") return startHost();
-    const dialog = document.querySelector("#host-permission-dialog");
-    if (!dialog.open) {
-      document.querySelector("#host-permission-error").textContent = "";
-      dialog.showModal();
     }
   }
 
@@ -455,7 +464,7 @@
     stream: () => actions["connect-code"](),
     admin: () => window.lan.call("openSunshine", selectedId),
     "local-admin": () => window.lan.call("openSunshine"),
-    "host-start": requestHostStart,
+    "host-start": startHost,
     "firewall-recheck": startHost,
     "firewall-settings": () => window.lan.call("openFirewallSettings"),
     "host-stop": () => window.lan.call("hostStop"),
@@ -478,11 +487,7 @@
     "host-settings": () => window.lan.call("openHostSettings"),
     "host-accessibility-settings": () =>
       window.lan.call("openHostAccessibilitySettings"),
-    "host-permission-continue": () => {
-      document.querySelector("#host-permission-dialog").close();
-      return startHost();
-    },
-    "host-reveal": () => window.lan.call("revealHostApp"),
+    "local-network-settings": () => window.lan.call("openLocalNetworkSettings"),
     "host-reveal-soluna": () => window.lan.call("revealSolunaApp"),
     "show-host-password": async () => {
       if (!localPasswordVisible && !localPassword) {
@@ -494,7 +499,7 @@
     "host-toggle": async () => {
       if (hostTogglePending) return;
       const running = state.host.phase === "running";
-      if (!running) return requestHostStart();
+      if (!running) return startHost();
       hostTogglePending = true;
       renderContent();
       try {
@@ -551,9 +556,6 @@
     } catch (error) {
       if (document.querySelector("#firewall-dialog").open)
         document.querySelector("#firewall-error").textContent = error.message;
-      else if (document.querySelector("#host-permission-dialog").open)
-        document.querySelector("#host-permission-error").textContent =
-          error.message;
       else notify(error.message);
     }
   });
@@ -632,7 +634,8 @@
     if (event.target.id === "connect-form") {
       partnerPasswordRequest++;
       event.preventDefault();
-      document.querySelector("#connect-error").textContent = "";
+      connectError = "";
+      localNetworkDenied = false;
       const form = event.target;
       connecting = true;
       renderContent();
@@ -651,12 +654,21 @@
         renderContent();
         notify("密码验证通过，正在等待远程桌面首帧。");
       } catch (error) {
-        const message = error.message;
+        localNetworkDenied =
+          state.platform === "macos" &&
+          error.message === "LOCAL_NETWORK_DENIED";
+        connectError = localNetworkDenied
+          ? "请在“系统设置 > 隐私与安全性 > 本地网络”中允许 SolunaRemote，然后重新连接。"
+          : error.message;
         connecting = false;
         renderContent();
-        document.querySelector("#connect-error").textContent = message;
-      } finally {
-        connecting = false;
+        if (localNetworkDenied) {
+          try {
+            await actions["local-network-settings"]();
+          } catch (settingsError) {
+            notify(settingsError.message);
+          }
+        }
       }
       return;
     }

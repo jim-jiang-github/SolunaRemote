@@ -8,6 +8,10 @@ const renderer = fs.readFileSync(
   path.join(__dirname, "../../app/renderer/renderer.js"),
   "utf8",
 );
+const markup = fs.readFileSync(
+  path.join(__dirname, "../../app/renderer/index.html"),
+  "utf8",
+);
 
 async function setup(platform = "macos", firewallManagedByPackage = false) {
   const nodes = new Map();
@@ -48,7 +52,9 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
   };
   const backend = {
     allowed: false,
+    accessibilityAllowed: true,
     failure: null,
+    connectFailure: null,
     check: null,
     onState: null,
     simulateRemoteControl() {
@@ -60,8 +66,12 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
     async call(method) {
       calls.push(method);
       if (method === "state") return snapshot;
+      if (method === "hostAccessibilityStatus")
+        return backend.accessibilityAllowed;
       if (method === "hostFirewallStatus")
         return backend.check ? backend.check() : backend.allowed;
+      if (method === "connectPassword" && backend.connectFailure)
+        throw new Error(backend.connectFailure);
       if (backend.failure) throw new Error(backend.failure);
       if (method === "hostStart") {
         snapshot.host.phase = "running";
@@ -104,8 +114,48 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
   calls.length = 0;
   const click = (dataset) =>
     handlers.click({ target: { closest: () => ({ dataset }) } });
-  return { node, calls, backend, click };
+  const connect = () =>
+    handlers.submit({
+      target: {
+        id: "connect-form",
+        elements: { code: { value: "123456789" }, password: { value: "test" } },
+      },
+      preventDefault() {},
+    });
+  return { node, calls, backend, click, connect, snapshot };
 }
+
+test("macOS opens local network settings only after an explicit permission denial", async () => {
+  const { backend, click, calls, connect, node, snapshot } = await setup();
+  assert.doesNotMatch(node("#content").innerHTML, /打开本地网络设置/);
+  backend.connectFailure = "LOCAL_NETWORK_DENIED";
+  await connect();
+  backend.onState(snapshot);
+  const html = node("#content").innerHTML;
+  assert.match(
+    html,
+    /role="alert">请在“系统设置 &gt; 隐私与安全性 &gt; 本地网络”中允许 SolunaRemote/,
+  );
+  assert.match(html, /打开本地网络设置/);
+  assert.match(html, /type="submit" >连接<\/button>/);
+  assert.deepEqual(calls, ["connectPassword", "openLocalNetworkSettings"]);
+  await click({ action: "local-network-settings" });
+  assert.equal(calls.length, 3);
+
+  backend.connectFailure = "No route to host (os error 65)";
+  await connect();
+  assert.equal(calls.at(-1), "connectPassword");
+  assert.match(node("#content").innerHTML, /No route to host/);
+  assert.doesNotMatch(node("#content").innerHTML, /打开本地网络设置/);
+});
+
+test("macOS keeps the manual settings button if automatic opening fails", async () => {
+  const { backend, connect, node } = await setup();
+  backend.connectFailure = "LOCAL_NETWORK_DENIED";
+  backend.failure = "无法打开本地网络设置";
+  await connect();
+  assert.match(node("#content").innerHTML, /打开本地网络设置/);
+});
 
 test("active remote control displays an alert and can be disconnected", async () => {
   const { backend, calls, node, click } = await setup();
@@ -121,13 +171,10 @@ test("active remote control displays an alert and can be disconnected", async ()
   assert.equal(node("#toast").textContent, "已断开远程连接并停止本机共享。");
 });
 
-test("macOS sharing explains authorization before opening settings or starting", async () => {
+test("macOS checks accessibility and firewall before starting sharing", async () => {
   const { click, node, calls, backend } = await setup();
   await click({ action: "host-toggle" });
-  assert.equal(node("#host-permission-dialog").open, true);
-  assert.deepEqual(calls, []);
-  await click({ action: "host-permission-continue" });
-  assert.deepEqual(calls, ["hostFirewallStatus"]);
+  assert.deepEqual(calls, ["hostAccessibilityStatus", "hostFirewallStatus"]);
   assert.equal(node("#firewall-dialog").open, true);
   await click({ action: "firewall-settings" });
   assert.equal(calls.at(-1), "openFirewallSettings");
@@ -136,14 +183,17 @@ test("macOS sharing explains authorization before opening settings or starting",
   assert.ok(node("#firewall-error").textContent);
   backend.allowed = true;
   await click({ action: "firewall-recheck" });
-  assert.deepEqual(calls.slice(-2), ["hostFirewallStatus", "hostStart"]);
+  assert.deepEqual(calls.slice(-3), [
+    "hostAccessibilityStatus",
+    "hostFirewallStatus",
+    "hostStart",
+  ]);
   assert.equal(node("#firewall-dialog").open, false);
 });
 
 test("cancelling during a firewall recheck never starts sharing", async () => {
   const { click, node, calls, backend } = await setup();
   await click({ action: "host-start" });
-  await click({ action: "host-permission-continue" });
   let resolveCheck;
   backend.check = () =>
     new Promise((resolve) => {
@@ -151,7 +201,7 @@ test("cancelling during a firewall recheck never starts sharing", async () => {
     });
   const pending = click({ action: "firewall-recheck" });
   await click({ action: "firewall-recheck" });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
   await click({ close: "firewall-dialog" });
   resolveCheck(true);
   await pending;
@@ -162,7 +212,6 @@ test("cancelling during a firewall recheck never starts sharing", async () => {
 test("authorization and start errors remain visible and allow retry", async () => {
   const { click, node, calls, backend } = await setup();
   await click({ action: "host-toggle" });
-  await click({ action: "host-permission-continue" });
   backend.failure = "settings unavailable";
   await click({ action: "firewall-settings" });
   assert.equal(node("#firewall-error").textContent, backend.failure);
@@ -239,31 +288,32 @@ test("MSIX sharing uses package-managed rules without requesting administrator a
   assert.equal(node("#firewall-dialog").open, false);
 });
 
-test("macOS prompts for input permission before starting even when the firewall allows sharing", async () => {
+test("macOS starts sharing after accessibility and firewall checks pass", async () => {
   const { click, calls, node, backend } = await setup();
   backend.allowed = true;
   await click({ action: "host-toggle" });
-  assert.equal(node("#host-permission-dialog").open, true);
-  assert.deepEqual(calls, []);
-  await click({ action: "host-permission-continue" });
-  assert.deepEqual(calls, ["hostFirewallStatus", "hostStart"]);
-  assert.equal(node("#host-permission-dialog").open, false);
+  assert.deepEqual(calls, [
+    "hostAccessibilityStatus",
+    "hostFirewallStatus",
+    "hostStart",
+  ]);
   assert.equal(node("#firewall-dialog").open, false);
 });
 
-test("macOS permission dialog opens settings and locates Sunshine only on request", async () => {
+test("macOS without accessibility permission opens settings and does not start sharing", async () => {
   const { click, calls, node, backend } = await setup();
+  backend.accessibilityAllowed = false;
   await click({ action: "host-start" });
-  await click({ action: "host-accessibility-settings" });
-  await click({ action: "host-reveal" });
-  assert.deepEqual(calls, ["openHostAccessibilitySettings", "revealHostApp"]);
-  backend.failure = "settings unavailable";
-  await click({ action: "host-accessibility-settings" });
-  assert.equal(
-    node("#host-permission-error").textContent,
-    "settings unavailable",
-  );
-  await click({ close: "host-permission-dialog" });
-  assert.equal(node("#host-permission-dialog").open, false);
+  assert.deepEqual(calls, [
+    "hostAccessibilityStatus",
+    "openHostAccessibilitySettings",
+  ]);
+  assert.equal(node("#firewall-dialog").open, false);
   assert.equal(calls.includes("hostStart"), false);
+  assert.doesNotMatch(markup, /host-permission-dialog/);
+});
+
+test("macOS instructions refer only to the SolunaRemote application", () => {
+  assert.doesNotMatch(renderer, /Sunshine\.app|revealHostApp/);
+  assert.doesNotMatch(markup, /Sunshine\.app|revealHostApp/);
 });

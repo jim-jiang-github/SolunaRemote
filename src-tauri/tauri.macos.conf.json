@@ -4,8 +4,8 @@
     "icon": ["icons/icon.icns"],
     "resources": [
       "resources/native/**/*",
-      "resources/host/Sunshine.app.zip",
-      "resources/host/Sunshine.app.zip.json",
+      "resources/host/soluna-host.zip",
+      "resources/host/soluna-host.zip.json",
       "resources/host/release.json",
       "resources/host/THIRD-PARTY-NOTICES.txt",
       "resources/host/licenses/**/*"

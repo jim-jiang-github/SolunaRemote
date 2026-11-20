@@ -2,10 +2,10 @@ const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
-const prepared = path.join(root, "host", "bin-macos");
+const prepared = path.join(root, "host", "bin-macos-local");
 const resources = path.join(root, "src-tauri", "resources");
 const sourceApp = path.join(prepared, "Sunshine.app");
 const releasePath = path.join(prepared, "release.json");
@@ -57,6 +57,8 @@ if (!fs.existsSync(sourceApp) || !fs.existsSync(releasePath))
 const release = JSON.parse(fs.readFileSync(releasePath, "utf8"));
 if (release.architecture !== process.arch)
   throw new Error("Prepared Sunshine does not match this Mac's architecture.");
+if (!/^v[0-9A-Za-z._-]+-local-[0-9a-f]{40}$/.test(release.version))
+  throw new Error("Prepared Sunshine is not a locally built release.");
 verifySignature(sourceApp);
 
 run("cmake", [
@@ -84,8 +86,8 @@ try {
 }
 
 const host = path.join(resources, "host");
-const targetArchive = path.join(host, "Sunshine.app.zip");
-const targetManifest = path.join(host, "Sunshine.app.zip.json");
+const targetArchive = path.join(host, "soluna-host.zip");
+const targetManifest = path.join(host, "soluna-host.zip.json");
 fs.mkdirSync(host, { recursive: true });
 if (fs.existsSync(targetArchive) !== fs.existsSync(targetManifest))
   throw new Error(
@@ -96,7 +98,8 @@ let temporary;
 try {
   temporary = fs.mkdtempSync(path.join(os.tmpdir(), "solunaremote-sunshine-"));
   const extracted = path.join(temporary, "extracted");
-  fs.mkdirSync(extracted);
+  const payload = path.join(temporary, "soluna-host");
+  fs.mkdirSync(payload);
 
   if (fs.existsSync(targetArchive)) {
     const manifest = JSON.parse(fs.readFileSync(targetManifest, "utf8"));
@@ -109,14 +112,104 @@ try {
         "A different or damaged Sunshine archive already exists; inspect it before replacing.",
       );
     run("ditto", ["-x", "-k", targetArchive, extracted]);
+    const archivedPayload = path.join(extracted, "soluna-host");
+    const hostExecutable = path.join(archivedPayload, "soluna-host");
+    for (const asset of ["desktop.png", "box.png"])
+      if (!fs.existsSync(path.join(archivedPayload, "assets", asset)))
+        throw new Error("The embedded Sunshine archive is incomplete.");
+    verifySignature(hostExecutable);
+    const identity = spawnSync(
+      "codesign",
+      ["-dv", "--verbose=4", hostExecutable],
+      { encoding: "utf8" },
+    );
+    if (identity.error) throw identity.error;
+    const details = `${identity.stdout}${identity.stderr}`;
+    if (
+      identity.status !== 0 ||
+      !details.includes("Identifier=local.solunaremote.desktop") ||
+      !details.includes(`CDHash=${manifest.cdhash}`)
+    )
+      throw new Error("The embedded Sunshine helper signature does not match.");
   } else {
-    const archive = path.join(temporary, "Sunshine.app.zip");
+    const archive = path.join(temporary, "soluna-host.zip");
+    const sourceExecutable = path.join(
+      sourceApp,
+      "Contents",
+      "MacOS",
+      "Sunshine",
+    );
+    const sourceFrameworks = path.join(sourceApp, "Contents", "Frameworks");
+    const sourceAssets = path.join(
+      sourceApp,
+      "Contents",
+      "Resources",
+      "assets",
+    );
+    const hostExecutable = path.join(payload, "soluna-host");
+    fs.copyFileSync(sourceExecutable, hostExecutable);
+    fs.chmodSync(hostExecutable, fs.statSync(sourceExecutable).mode & 0o777);
+    fs.mkdirSync(path.join(payload, "assets"));
+    fs.mkdirSync(path.join(payload, "Frameworks"));
+    for (const asset of ["desktop.png", "box.png"])
+      fs.copyFileSync(
+        path.join(sourceAssets, asset),
+        path.join(payload, "assets", asset),
+      );
+    if (fs.existsSync(sourceFrameworks))
+      run("ditto", [sourceFrameworks, path.join(payload, "Frameworks")]);
+    const entitlements = path.join(temporary, "entitlements.plist");
+    fs.writeFileSync(
+      entitlements,
+      fs
+        .readFileSync(
+          path.join(
+            root,
+            "third-party",
+            "Sunshine",
+            "src_assets",
+            "macos",
+            "entitlements.plist",
+          ),
+          "utf8",
+        )
+        .replace(/\r\n/g, "\n"),
+    );
+    for (const library of fs.readdirSync(path.join(payload, "Frameworks"))) {
+      if (library.endsWith(".dylib"))
+        run("codesign", [
+          "--force",
+          "--sign",
+          "-",
+          path.join(payload, "Frameworks", library),
+        ]);
+    }
+    run("codesign", [
+      "--force",
+      "--sign",
+      "-",
+      "--identifier",
+      "local.solunaremote.desktop",
+      "--entitlements",
+      entitlements,
+      hostExecutable,
+    ]);
+    verifySignature(hostExecutable);
+    const signature = spawnSync(
+      "codesign",
+      ["-dv", "--verbose=4", hostExecutable],
+      { encoding: "utf8" },
+    );
+    if (signature.error) throw signature.error;
+    const cdhash = signature.stderr.match(/^CDHash=([0-9a-f]{40})$/m)?.[1];
+    if (signature.status !== 0 || !cdhash)
+      throw new Error("Cannot determine the Sunshine helper code hash.");
     run("ditto", [
       "-c",
       "-k",
       "--sequesterRsrc",
       "--keepParent",
-      sourceApp,
+      payload,
       archive,
     ]);
     run("ditto", ["-x", "-k", archive, extracted]);
@@ -124,6 +217,7 @@ try {
       version: release.version,
       architecture: release.architecture,
       sha256: hashFile(archive),
+      cdhash,
     };
     fs.copyFileSync(archive, targetArchive, fs.constants.COPYFILE_EXCL);
     fs.writeFileSync(
@@ -132,7 +226,7 @@ try {
       { flag: "wx" },
     );
   }
-  verifySignature(path.join(extracted, "Sunshine.app"));
+  fs.rmSync(extracted, { recursive: true, force: true });
 } finally {
   if (temporary) fs.rmSync(temporary, { recursive: true, force: true });
 }
@@ -150,4 +244,6 @@ copyFileIfAbsent(
   path.join(targetLicenseDir, "Sunshine-LICENSE"),
 );
 
-console.log(`Prepared signed Sunshine ${release.version} in Tauri resources.`);
+console.log(
+  `Prepared locally built Sunshine ${release.version} in Tauri resources.`,
+);

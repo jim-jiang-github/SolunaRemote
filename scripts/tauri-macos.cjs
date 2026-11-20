@@ -11,6 +11,17 @@ if (process.platform !== "darwin")
 if (!["dev", "build"].includes(mode))
   throw new Error("Usage: node scripts/tauri-macos.cjs <dev|build>");
 
+if (mode === "build") {
+  const bundleDir = path.join(root, "src-tauri", "target", "release", "bundle");
+  for (const output of [
+    path.join(bundleDir, "macos", "SolunaRemote.app"),
+    path.join(bundleDir, "dmg", `SolunaRemote_${version}_${process.arch}.dmg`),
+  ]) {
+    if (fs.existsSync(output))
+      throw new Error(`Refusing to overwrite existing output: ${output}`);
+  }
+}
+
 execFileSync(
   process.execPath,
   [path.join(__dirname, "prepare-tauri-macos.cjs")],
@@ -33,6 +44,17 @@ if (mode === "build") {
   if (!fs.existsSync(app))
     throw new Error("Tauri did not produce the SolunaRemote.app bundle.");
 
+  execFileSync(
+    "cmake",
+    [
+      `-DAPP=${app}`,
+      `-DNATIVE=${path.join(app, "Contents", "Resources", "resources", "native", "soluna-stream")}`,
+      "-P",
+      path.join(__dirname, "bundle-macos.cmake"),
+    ],
+    { stdio: "inherit" },
+  );
+
   const dmgDir = path.join(bundleDir, "dmg");
   const dmg = path.join(dmgDir, `SolunaRemote_${version}_${process.arch}.dmg`);
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "solunaremote-dmg-"));
@@ -50,7 +72,6 @@ if (mode === "build") {
         "SolunaRemote",
         "-srcfolder",
         staging,
-        "-ov",
         "-format",
         "UDZO",
         dmg,

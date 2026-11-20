@@ -596,14 +596,7 @@ fn authorize_on(
         body.len()
     )
     .map_err(|error| format!("无法发送访问验证请求：{error}"))?;
-    let mut response = Vec::new();
-    stream
-        .take(4097)
-        .read_to_end(&mut response)
-        .map_err(|error| format!("无法读取访问验证响应：{error}"))?;
-    if response.len() > 4096 {
-        return Err("设备响应过大。".into());
-    }
+    let response = read_access_response(&mut stream)?;
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -625,6 +618,52 @@ fn authorize_on(
     }
     let display_count = reported_display_count(&body)?;
     Ok(Some(display_count))
+}
+
+fn read_access_response(stream: &mut impl Read) -> Result<Vec<u8>, String> {
+    const LIMIT: usize = 4096;
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        if response.len() >= LIMIT {
+            return Err("设备响应过大。".into());
+        }
+        let mut byte = [0];
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| format!("无法读取访问验证响应：{error}"))?;
+        response.push(byte[0]);
+    }
+    let headers =
+        std::str::from_utf8(&response).map_err(|_| "设备返回了无效的访问验证状态。".to_string())?;
+    let mut content_length = None;
+    for line in headers.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err("设备返回了不支持的响应编码。".into());
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some() {
+                    return Err("设备返回了重复的响应长度。".into());
+                }
+                content_length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "设备返回了无效的响应长度。".to_string())?,
+                );
+            }
+        }
+    }
+    let length = content_length.ok_or_else(|| "设备未返回响应长度。".to_string())?;
+    if length > LIMIT - response.len() {
+        return Err("设备响应过大。".into());
+    }
+    let start = response.len();
+    response.resize(start + length, 0);
+    stream
+        .read_exact(&mut response[start..])
+        .map_err(|error| format!("无法读取访问验证响应：{error}"))?;
+    Ok(response)
 }
 
 fn reported_display_count(body: &serde_json::Value) -> Result<u32, String> {
@@ -908,8 +947,13 @@ fn serve_connection(
         Ok(Request::NotFound) => response(404, "Not Found", br#"{"error":"not found"}"#),
         Err(()) => response(400, "Bad Request", br#"{"error":"invalid request"}"#),
     };
-    let _ = stream.write_all(&response);
-    let _ = stream.flush();
+    if let Err(error) = stream.write_all(&response).and_then(|_| stream.flush()) {
+        eprintln!("无法发送访问验证响应：{error}");
+        return;
+    }
+    if let Err(error) = stream.shutdown() {
+        eprintln!("无法正常关闭访问验证 TLS 连接：{error}");
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1334,6 +1378,32 @@ mod tests {
     }
 
     #[test]
+    fn psk_client_accepts_complete_response_without_tls_close_notify() {
+        let code = "340382852";
+        let key = password_key("test-password", code).unwrap();
+        let acceptor = psk_acceptor(code, &key).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let mut stream = acceptor.accept(socket).unwrap();
+            assert!(matches!(
+                read_request(&mut stream),
+                Ok(Request::Authenticate)
+            ));
+            stream
+                .write_all(&response(200, "OK", br#"{"ok":true,"displayCount":1}"#))
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        assert_eq!(
+            authorize_on(Ipv4Addr::LOCALHOST, port, code, "test-password", None).unwrap(),
+            Some(1)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn psk_client_authorizes_the_internal_pair_request() {
         let code = "340382852";
         let key = password_key("test-password", code).unwrap();
@@ -1395,6 +1465,21 @@ mod tests {
             "POST /authenticate HTTP/1.1\r\nContent-Length: 1025\r\n\r\n",
         ] {
             assert!(parse_request_head(request.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn access_response_requires_a_complete_bounded_body() {
+        let valid = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(read_access_response(&mut &valid[..]).unwrap(), valid);
+        for invalid in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\n\r\n"[..],
+        ] {
+            assert!(read_access_response(&mut &invalid[..]).is_err());
         }
     }
 

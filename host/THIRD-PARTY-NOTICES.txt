@@ -1,21 +1,14 @@
 SolunaRemote integrated host
 
-The Windows package embeds the unmodified official Sunshine portable engine:
-Sunshine v2026.914.233613
-https://github.com/SunshineStream/Sunshine/tree/v2026.914.233613
-Release archive SHA256:
-233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b
-The macOS preparation script retrieves the corresponding official signed
-Sunshine application. Its architecture-specific archive hashes are recorded
-in scripts/prepare-host-macos.cjs.
+The embedded Windows and locally built macOS hosts use the modified Sunshine
+source in third-party/Sunshine. The macOS host is built locally and ad-hoc
+signed; it is not an official Sunshine release.
 
 Sunshine is GPL-3.0 software. Preserve its license and provide complete
 corresponding source, dependency sources and build scripts as required when
 redistributing this binary. A source URL or license alone is not a substitute
 for satisfying the complete corresponding source obligations.
 
-The upstream binary may contain statically linked Qt tray support.
-SolunaRemote disables the Sunshine tray and does not invoke its installer,
-service registration, driver installation or independent user interface.
+SolunaRemote builds Sunshine without its tray and independent web interface.
 The soluna-stream client uses moonlight-common-c, FFmpeg and SDL directly,
 without requiring a separately installed client application.

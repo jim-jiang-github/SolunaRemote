@@ -45,6 +45,42 @@ function debugEndpoint(port) {
   });
 }
 
+async function assertEmptyStateColors(page, dark) {
+  const colors = await page.evaluate(() => {
+    const panel = document.createElement("div");
+    panel.className = "empty-state";
+    panel.textContent = "正在加载应用状态…";
+    document.querySelector("#content").append(panel);
+    const style = getComputedStyle(panel);
+    const result = { background: style.backgroundColor, text: style.color };
+    panel.remove();
+    return result;
+  });
+  const luminance = (color) => {
+    const channels = color.match(/\d+/g).slice(0, 3).map(Number);
+    return channels
+      .map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045
+          ? value / 12.92
+          : ((value + 0.055) / 1.055) ** 2.4;
+      })
+      .reduce(
+        (sum, channel, index) =>
+          sum + channel * [0.2126, 0.7152, 0.0722][index],
+        0,
+      );
+  };
+  const background = luminance(colors.background);
+  const text = luminance(colors.text);
+  assert.ok(dark ? background < 0.1 : background > 0.8, JSON.stringify(colors));
+  assert.ok(
+    (Math.max(background, text) + 0.05) / (Math.min(background, text) + 0.05) >=
+      4.5,
+    JSON.stringify(colors),
+  );
+}
+
 async function main() {
   const executable = path.resolve(
     process.argv[2] || "src-tauri/target/release/solunaremote.exe",
@@ -135,6 +171,10 @@ async function main() {
     await expect(page.locator(".statusbar")).not.toContainText("客户端无");
     await expect(page.locator("#statusbar-text")).toBeEmpty();
     await expect(page.getByText("我的设备", { exact: true })).toHaveCount(0);
+    const initialDark = await page.evaluate(
+      () => document.documentElement.dataset.iconTheme === "dark",
+    );
+    await assertEmptyStateColors(page, initialDark);
     const initialThemeColor = await page.evaluate(
       () => getComputedStyle(document.documentElement).backgroundColor,
     );
@@ -147,6 +187,7 @@ async function main() {
     const finalThemeColor = await page.evaluate(
       () => getComputedStyle(document.documentElement).backgroundColor,
     );
+    await assertEmptyStateColors(page, !initialDark);
     assert.notEqual(midTransitionThemeColor, initialThemeColor);
     assert.notEqual(midTransitionThemeColor, finalThemeColor);
     await page.locator("#theme-toggle").click();
@@ -317,6 +358,7 @@ async function main() {
     await page.evaluate(() => {
       window.originalLanCall = window.lan.call;
       window.lan.call = async (method, input) => {
+        if (method === "hostFirewallStatus") return true;
         if (method === "hostStart") {
           await new Promise((resolve) => {
             window.finishFakeHostStart = resolve;

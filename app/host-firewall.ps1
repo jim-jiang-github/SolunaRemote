@@ -15,14 +15,15 @@ function Normalize-ExecutablePath([string]$Path) {
 try {
     $Executable = Normalize-ExecutablePath $Executable
     $AppExecutable = Normalize-ExecutablePath $AppExecutable
-    if (-not [IO.Path]::IsPathRooted($Executable) -or
-        -not (Test-Path -LiteralPath $Executable -PathType Leaf) -or
-        [IO.Path]::GetFileName($Executable) -ne 'sunshine.exe') {
-        throw 'Invalid bundled host executable.'
-    }
     if (-not [IO.Path]::IsPathRooted($AppExecutable) -or
         -not (Test-Path -LiteralPath $AppExecutable -PathType Leaf)) {
         throw 'Invalid SolunaRemote executable.'
+    }
+    if (-not [IO.Path]::IsPathRooted($Executable) -or
+        -not (Test-Path -LiteralPath $Executable -PathType Leaf) -or
+        ([IO.Path]::GetFileName($Executable) -ne 'sunshine.exe' -and
+         [IO.Path]::GetFullPath($Executable) -ne [IO.Path]::GetFullPath($AppExecutable))) {
+        throw 'Invalid bundled host executable.'
     }
     $hasher = [Security.Cryptography.SHA256]::Create()
     try {

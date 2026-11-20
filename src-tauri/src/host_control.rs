@@ -1,6 +1,6 @@
 use crate::{
     network::{self, AppInfo, ServerInfo, Target},
-    process::background_command,
+    process::native_command,
     validation::{self, Settings},
 };
 use aes::{
@@ -59,7 +59,7 @@ impl HostControl {
         }
         fs::create_dir_all(&self.directory)
             .map_err(|error| format!("无法创建客户端身份目录：{error}"))?;
-        let output = background_command(executable)
+        let output = native_command(executable)
             .arg("--identity")
             .arg(&self.directory)
             .output()

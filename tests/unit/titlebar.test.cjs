@@ -55,25 +55,27 @@ test("macOS permission actions go through the guarded Tauri backend", async () =
   await window.__lanBridgeReady;
   await window.lan.call("openHostSettings");
   await window.lan.call("openHostAccessibilitySettings");
+  await window.lan.call("openLocalNetworkSettings");
+  await window.lan.call("hostAccessibilityStatus");
   await window.lan.call("hostFirewallStatus");
   await window.lan.call("openFirewallSettings");
-  await window.lan.call("revealHostApp");
   await window.lan.call("revealSolunaApp");
   assert.deepEqual(
     calls.map(({ command, args }) => [command, args.method]),
     [
       ["backend_call", "openHostSettings"],
       ["backend_call", "openHostAccessibilitySettings"],
+      ["backend_call", "openLocalNetworkSettings"],
+      ["backend_call", "hostAccessibilityStatus"],
       ["backend_call", "hostFirewallStatus"],
       ["backend_call", "openFirewallSettings"],
-      ["backend_call", "revealHostApp"],
       ["backend_call", "revealSolunaApp"],
     ],
   );
   await assert.rejects(window.lan.call("unsupportedAction"));
 });
 
-test("macOS accessibility settings action is allowed by the backend", () => {
+test("macOS privacy settings actions are allowed by the backend", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "../../src-tauri/src/main.rs"),
     "utf8",
@@ -82,6 +84,10 @@ test("macOS accessibility settings action is allowed by the backend", () => {
   assert.ok(allowed);
   assert.match(allowed[1], /"openHostAccessibilitySettings"/);
   assert.match(source, /"openHostAccessibilitySettings" =>/);
+  assert.match(allowed[1], /"openLocalNetworkSettings"/);
+  assert.match(source, /"openLocalNetworkSettings" =>/);
+  assert.match(allowed[1], /"hostAccessibilityStatus"/);
+  assert.match(source, /"hostAccessibilityStatus" =>/);
 });
 
 test("titlebar actions ignore interactive controls", async () => {

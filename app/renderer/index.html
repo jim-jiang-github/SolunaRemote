@@ -514,42 +514,6 @@
         </div>
       </div>
     </dialog>
-    <dialog id="host-permission-dialog" aria-labelledby="host-permission-title">
-      <div class="dialog-body">
-        <div class="dialog-header">
-          <h2 id="host-permission-title">允许远程键鼠控制</h2>
-        </div>
-        <p class="dialog-description">
-          被控 Mac 的 Sunshine 需要“辅助功能”权限；部分 macOS
-          版本称为“设备控制和数据访问”。 请打开权限设置，点击“+”添加下方定位到的
-          Sunshine.app 并开启。 仅授权 SolunaRemote 可能无法控制键鼠。
-        </p>
-        <p class="field-help">
-          系统权限由你自行选择，应用不会自动修改。此处无法确认 Sunshine
-          的授权状态； 未授权时仍可继续，但远程键鼠可能无法使用。
-        </p>
-        <div class="dialog-footer">
-          <button class="button secondary" data-action="host-reveal">
-            定位 Sunshine.app
-          </button>
-          <button
-            class="button secondary"
-            data-action="host-accessibility-settings"
-          >
-            打开权限设置
-          </button>
-        </div>
-        <p id="host-permission-error" class="form-error" role="alert"></p>
-        <div class="dialog-footer">
-          <button class="button secondary" data-close="host-permission-dialog">
-            取消
-          </button>
-          <button class="button primary" data-action="host-permission-continue">
-            继续开启共享
-          </button>
-        </div>
-      </div>
-    </dialog>
     <dialog id="firewall-dialog" aria-labelledby="firewall-title">
       <div class="dialog-body">
         <div class="dialog-header">
@@ -557,8 +521,8 @@
         </div>
         <p class="dialog-description" id="firewall-description">
           当前防火墙检查未通过。请在“系统设置 > 网络 > 防火墙”的“选项”中允许
-          SolunaRemote.app 和内置共享引擎 Sunshine.app 接受传入连接。
-          录屏权限与防火墙授权不同，两个应用都需要允许入站连接。
+          SolunaRemote.app 接受传入连接。内置共享引擎已包含在该应用中。
+          录屏权限与防火墙授权不同。
           防火墙关闭时不要求此授权，也无需为共享专门开启防火墙。
         </p>
         <p class="field-help" id="firewall-help">
@@ -568,10 +532,7 @@
         </p>
         <div class="dialog-footer" id="firewall-locate">
           <button class="button secondary" data-action="host-reveal-soluna">
-            定位 SolunaRemote
-          </button>
-          <button class="button secondary" data-action="host-reveal">
-            定位内置引擎
+            定位 SolunaRemote.app
           </button>
         </div>
         <p id="firewall-error" class="form-error" role="alert"></p>

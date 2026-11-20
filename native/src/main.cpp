@@ -241,12 +241,15 @@ static void generateIdentity(const std::filesystem::path &directory) {
                 X509_gmtime_adj(X509_getm_notAfter(cert.get()), 60L * 60 * 24 * 365 * 10) &&
                 X509_set_pubkey(cert.get(), key.get()) == 1,
             "Cannot set certificate lifetime");
-    auto *name = X509_get_subject_name(cert.get());
-    require(
-        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                                   reinterpret_cast<const unsigned char *>("SolunaRemote"), -1, -1, 0) == 1 &&
-            X509_set_issuer_name(cert.get(), name) == 1 && X509_sign(cert.get(), key.get(), EVP_sha256()) > 0,
-        "Cannot sign client certificate");
+    std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)> name(X509_NAME_new(), X509_NAME_free);
+    require(name &&
+                X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC,
+                                           reinterpret_cast<const unsigned char *>("SolunaRemote"), -1, -1,
+                                           0) == 1 &&
+                X509_set_subject_name(cert.get(), name.get()) == 1 &&
+                X509_set_issuer_name(cert.get(), name.get()) == 1 &&
+                X509_sign(cert.get(), key.get(), EVP_sha256()) > 0,
+            "Cannot sign client certificate");
     auto writePem = [](const std::filesystem::path &file, auto writer) {
         std::unique_ptr<BIO, decltype(&BIO_free)> memory(BIO_new(BIO_s_mem()), BIO_free);
         require(memory && writer(memory.get()) == 1, "Cannot serialize client identity");
@@ -1032,7 +1035,9 @@ struct Player {
 };
 Player *Player::current = nullptr;
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SOLUNA_STREAM_EMBEDDED)
+extern "C" __declspec(dllexport) int soluna_stream_main(int argc, wchar_t **wideArgs) {
+#elif defined(_WIN32)
 int wmain(int argc, wchar_t **wideArgs) {
 #else
 int main(int argc, char **argv) {

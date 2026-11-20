@@ -3327,6 +3327,7 @@ version = "0.4.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
+ "cc",
  "form_urlencoded",
  "if-addrs",
  "mdns-sd",

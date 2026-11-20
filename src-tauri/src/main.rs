@@ -4,6 +4,8 @@
 compile_error!("The microsoft-store feature requires Windows.");
 
 mod access;
+#[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+mod embedded;
 mod host_control;
 mod host_runtime;
 mod network;
@@ -27,7 +29,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::Duration,
 };
@@ -41,6 +43,12 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
 struct Backend {
     store: Mutex<store::Store>,
     access: Mutex<access::AccessState>,
@@ -48,11 +56,42 @@ struct Backend {
     discovery: Mutex<Option<mdns_sd::ServiceDaemon>>,
     host: Arc<Mutex<host_runtime::HostRuntime>>,
     host_operation: Mutex<()>,
+    #[cfg(target_os = "macos")]
+    watching_accessibility: AtomicBool,
     control: Arc<Mutex<host_control::HostControl>>,
     client: Arc<Mutex<ClientRuntime>>,
     statuses: Mutex<HashMap<String, network::ValueStatus>>,
     resources: PathBuf,
-    sunshine_app: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct BackendStartup {
+    result: Mutex<Option<Result<Arc<Backend>, String>>>,
+    ready: Condvar,
+}
+
+impl BackendStartup {
+    fn finish(&self, result: Result<Backend, String>) {
+        match self.result.lock() {
+            Ok(mut state) => {
+                *state = Some(result.map(Arc::new));
+                self.ready.notify_all();
+            }
+            Err(_) => eprintln!("无法保存后端初始化结果。"),
+        }
+    }
+
+    fn wait(&self) -> Result<Arc<Backend>, String> {
+        let state = self
+            .result
+            .lock()
+            .map_err(|_| "后端初始化状态不可用。".to_string())?;
+        let state = self
+            .ready
+            .wait_while(state, |result| result.is_none())
+            .map_err(|_| "后端初始化状态不可用。".to_string())?;
+        state.as_ref().expect("initialization completed").clone()
+    }
 }
 
 struct ClientRuntime {
@@ -170,12 +209,7 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
             })
         })
         .collect();
-    let native_name = if cfg!(target_os = "windows") {
-        "soluna-stream.exe"
-    } else {
-        "soluna-stream"
-    };
-    let native_path = backend.resources.join("native").join(native_name);
+    let native_path = native_executable(&backend.resources)?;
     Ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "platform": if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "windows") { "windows" } else { "other" },
@@ -183,7 +217,7 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
         "devices": devices,
         "settings": data.settings,
         "engines": {
-            "nativeAvailable": native_path.is_file(),
+            "nativeAvailable": native_available(&native_path),
         },
         "host": {
             "firewallManagedByPackage": cfg!(feature = "microsoft-store"),
@@ -224,7 +258,7 @@ async fn check_store_updates(app: tauri::AppHandle) -> Result<bool, String> {
 #[tauri::command]
 async fn backend_call(
     app: tauri::AppHandle,
-    state: State<'_, Backend>,
+    startup: State<'_, Arc<BackendStartup>>,
     method: String,
     input: Value,
 ) -> Result<Value, String> {
@@ -249,16 +283,21 @@ async fn backend_call(
         "sunshineUrl",
         "openHostSettings",
         "openHostAccessibilitySettings",
+        "openLocalNetworkSettings",
+        "hostAccessibilityStatus",
         "hostFirewallStatus",
         "openFirewallSettings",
-        "revealHostApp",
         "revealSolunaApp",
     ];
     if !allowed.contains(&method.as_str()) {
         return Err("不允许的后端请求。".to_string());
     }
+    let startup = Arc::clone(startup.inner());
+    let state = tauri::async_runtime::spawn_blocking(move || startup.wait())
+        .await
+        .map_err(|error| format!("等待后端初始化失败：{error}"))??;
     let result = match method.as_str() {
-        "state" => backend_snapshot(state.inner())?,
+        "state" => backend_snapshot(&state)?,
         "add" => {
             let input: validation::DeviceInput =
                 serde_json::from_value(input).map_err(|error| format!("设备格式无效：{error}"))?;
@@ -377,7 +416,7 @@ async fn backend_call(
                     .map_err(|_| "设备状态不可用。".to_string())?
                     .insert(device.id, status);
             }
-            backend_snapshot(state.inner())?
+            backend_snapshot(&state)?
         }
         "discover" => serde_json::to_value(network::discover(Duration::from_millis(4500))?)
             .map_err(|error| format!("无法返回发现结果：{error}"))?,
@@ -403,30 +442,30 @@ async fn backend_call(
             Value::Null
         }
         "openHostAccessibilitySettings" => {
+            #[cfg(target_os = "macos")]
+            let needs_access = !host_accessibility_status();
             open_host_accessibility_settings()?;
+            #[cfg(target_os = "macos")]
+            if needs_access {
+                watch_accessibility_grant(&app, &state)?;
+            }
             Value::Null
         }
+        "openLocalNetworkSettings" => {
+            open_local_network_settings()?;
+            Value::Null
+        }
+        "hostAccessibilityStatus" => json!(host_accessibility_status()),
         "hostFirewallStatus" => {
             #[cfg(feature = "microsoft-store")]
             return Err("商店版本的防火墙规则由 MSIX 包管理；仅在专用或域网络中提供共享，不请求管理员授权。".into());
             #[cfg(not(feature = "microsoft-store"))]
             {
-                json!(check_host_firewall(
-                    &state.resources,
-                    state.sunshine_app.as_deref()
-                )?)
+                json!(check_host_firewall(&state.resources,)?)
             }
         }
         "openFirewallSettings" => {
             open_firewall_settings()?;
-            Value::Null
-        }
-        "revealHostApp" => {
-            let app = state
-                .sunshine_app
-                .as_deref()
-                .ok_or_else(|| "发行包缺少内置 Sunshine.app。".to_string())?;
-            reveal_host_app(app)?;
             Value::Null
         }
         "revealSolunaApp" => {
@@ -510,8 +549,8 @@ async fn backend_call(
             };
             #[cfg(not(feature = "microsoft-store"))]
             ensure_host_firewall(
-                || check_host_firewall(&state.resources, state.sunshine_app.as_deref()),
-                || authorize_host_firewall(&state.resources, state.sunshine_app.as_deref()),
+                || check_host_firewall(&state.resources),
+                || authorize_host_firewall(&state.resources),
             )?;
             #[cfg(target_os = "macos")]
             ensure_macos_screen_capture_access()?;
@@ -616,21 +655,21 @@ async fn backend_call(
             }
             Value::Null
         }
-        "connectPassword" => connect_password(&app, state.inner(), input)?,
+        "connectPassword" => connect_password(&app, &state, input)?,
         "cancelConnect" => {
-            cancel_client(state.inner(), None)?;
+            cancel_client(&state, None)?;
             Value::Null
         }
         "cancel" => {
             let id = input
                 .as_str()
                 .ok_or_else(|| "操作 ID 格式无效。".to_string())?;
-            cancel_client(state.inner(), Some(id))?;
+            cancel_client(&state, Some(id))?;
             Value::Null
         }
         _ => return Err("不允许的后端请求。".into()),
     };
-    let snapshot = backend_snapshot(state.inner())?;
+    let snapshot = backend_snapshot(&state)?;
     let _ = app.emit("lan:state", snapshot);
     Ok(result)
 }
@@ -675,7 +714,17 @@ fn connect_password(
     }
 
     let result = (|| {
+        #[cfg(target_os = "macos")]
+        let encoded_ip = access::decode_address(&code);
+        #[cfg(target_os = "macos")]
+        if let Some(ip) = encoded_ip {
+            check_local_network_permission(ip)?;
+        }
         let target = network::discover_code(&code, Duration::from_secs(8))?;
+        #[cfg(target_os = "macos")]
+        if encoded_ip.is_none() {
+            check_local_network_permission(target.ip)?;
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err("连接已取消。".into());
         }
@@ -741,14 +790,9 @@ fn connect_password(
             .snapshot()?
             .settings
             .validate()?;
-        let native_name = if cfg!(target_os = "windows") {
-            "soluna-stream.exe"
-        } else {
-            "soluna-stream"
-        };
-        let executable = backend.resources.join("native").join(native_name);
+        let executable = native_executable(&backend.resources)?;
         validate_native_path(&executable.to_string_lossy())?;
-        let capabilities = process::background_command(&executable)
+        let capabilities = process::native_command(&executable)
             .arg("--capabilities")
             .output()
             .map_err(|error| format!("无法检查原生引擎：{error}"))?;
@@ -834,7 +878,7 @@ fn connect_password(
         let mut config = config;
         config["deviceName"] = json!(device.name);
         config["displayCount"] = json!(remote_display_count);
-        let mut child = process::background_command(&executable)
+        let mut child = process::native_command(&executable)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1143,9 +1187,9 @@ fn ensure_screen_capture_access(
 }
 
 #[cfg(all(target_os = "windows", not(feature = "microsoft-store")))]
-fn check_host_firewall(resources: &Path, _sunshine_app: Option<&Path>) -> Result<bool, String> {
+fn check_host_firewall(resources: &Path) -> Result<bool, String> {
     let app = std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))?;
-    let host = resources.join("host").join("sunshine.exe");
+    let host = windows_host_executable(resources, &app);
     let command = format!(
         "& {{\n{}\n}} -Executable '{}' -AppExecutable '{}'; exit $LASTEXITCODE",
         include_str!("../../app/host-firewall-check.ps1"),
@@ -1174,8 +1218,7 @@ fn check_host_firewall(resources: &Path, _sunshine_app: Option<&Path>) -> Result
 }
 
 #[cfg(target_os = "macos")]
-fn check_host_firewall(_resources: &Path, sunshine_app: Option<&Path>) -> Result<bool, String> {
-    let app = sunshine_app.ok_or_else(|| "发行包缺少内置 Sunshine.app。".to_string())?;
+fn check_host_firewall(_resources: &Path) -> Result<bool, String> {
     let firewall = "/usr/libexec/ApplicationFirewall/socketfilterfw";
     let state = Command::new(firewall)
         .arg("--getglobalstate")
@@ -1193,21 +1236,23 @@ fn check_host_firewall(_resources: &Path, sunshine_app: Option<&Path>) -> Result
     let apps = Command::new(firewall)
         .arg("--listapps")
         .output()
-        .map_err(|error| format!("无法检查 Sunshine 防火墙授权：{error}"))?;
+        .map_err(|error| format!("无法检查 SolunaRemote 防火墙授权：{error}"))?;
     if !apps.status.success() {
         return Err(format!(
-            "无法检查 Sunshine 防火墙授权：{}",
+            "无法检查 SolunaRemote 防火墙授权：{}",
             String::from_utf8_lossy(&apps.stderr).trim()
         ));
     }
     let listing = String::from_utf8_lossy(&apps.stdout);
+    let app = macos_application_bundle_path()?;
     let app_executable = macos_application_firewall_path()?;
-    Ok(macos_firewall_allows_app(&listing, app)
-        && macos_firewall_allows_app(&listing, &app_executable))
+    let host_executable = app.join("Contents").join("MacOS").join("soluna-host");
+    Ok(macos_firewall_allows_app(&listing, &app_executable)
+        && macos_firewall_allows_app(&listing, &host_executable))
 }
 
 #[cfg(target_os = "macos")]
-fn macos_application_firewall_path() -> Result<PathBuf, String> {
+fn macos_application_bundle_path() -> Result<PathBuf, String> {
     let executable =
         std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))?;
     Ok(executable
@@ -1215,6 +1260,13 @@ fn macos_application_firewall_path() -> Result<PathBuf, String> {
         .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("app"))
         .unwrap_or(&executable)
         .to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_firewall_path() -> Result<PathBuf, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))?;
+    Ok(executable)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1242,13 +1294,13 @@ fn macos_firewall_allows_app(listing: &str, app: &Path) -> bool {
 }
 
 #[cfg(all(target_os = "windows", not(feature = "microsoft-store")))]
-fn authorize_host_firewall(resources: &Path, _sunshine_app: Option<&Path>) -> Result<(), String> {
-    let executable = resources.join("host").join("sunshine.exe");
+fn authorize_host_firewall(resources: &Path) -> Result<(), String> {
+    let app_executable =
+        std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))?;
+    let executable = windows_host_executable(resources, &app_executable);
     if !executable.is_file() {
         return Err("发行包缺少内置 Sunshine。".into());
     }
-    let app_executable =
-        std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))?;
     let outer = format!(
         "$ErrorActionPreference='Stop'; $process=Start-Process -FilePath '{}' -Verb RunAs -Wait -PassThru -ArgumentList @('--authorize-firewall'); exit $process.ExitCode",
         app_executable.to_string_lossy().replace('\'', "''"),
@@ -1282,7 +1334,7 @@ fn elevated_firewall(args: &[String]) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "无法定位应用目录。".to_string())?
         .join("resources");
-    let host = resources.join("host").join("sunshine.exe");
+    let host = windows_host_executable(&resources, &app);
     let script = include_str!("../../app/host-firewall.ps1");
     let command = format!(
         "& {{\n{script}\n}} -Executable '{}' -AppExecutable '{}'; exit $LASTEXITCODE",
@@ -1310,6 +1362,15 @@ fn elevated_firewall(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(all(target_os = "windows", not(feature = "microsoft-store")))]
+fn windows_host_executable(resources: &Path, app: &Path) -> PathBuf {
+    if cfg!(feature = "embedded-sunshine") {
+        app.to_path_buf()
+    } else {
+        resources.join("host").join("sunshine.exe")
+    }
+}
+
+#[cfg(all(target_os = "windows", not(feature = "microsoft-store")))]
 fn system_powershell() -> Result<PathBuf, String> {
     use std::os::windows::ffi::OsStringExt;
     #[link(name = "kernel32")]
@@ -1332,9 +1393,11 @@ fn system_powershell() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn authorize_host_firewall(_resources: &Path, sunshine_app: Option<&Path>) -> Result<(), String> {
-    sunshine_app.ok_or_else(|| "发行包缺少内置 Sunshine.app。".to_string())?;
-    Err("防火墙检查未通过。请在已开启的防火墙中允许 Sunshine.app 与 SolunaRemote.app 接受传入连接，再重新检查。".into())
+fn authorize_host_firewall(_resources: &Path) -> Result<(), String> {
+    Err(
+        "防火墙检查未通过。请在已开启的防火墙中允许 SolunaRemote.app 接受传入连接，再重新检查。"
+            .into(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1355,12 +1418,12 @@ fn open_firewall_settings() -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn check_host_firewall(_resources: &Path, _sunshine_app: Option<&Path>) -> Result<bool, String> {
+fn check_host_firewall(_resources: &Path) -> Result<bool, String> {
     Err("当前平台暂不支持本机共享防火墙授权。".into())
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn authorize_host_firewall(_resources: &Path, _sunshine_app: Option<&Path>) -> Result<(), String> {
+fn authorize_host_firewall(_resources: &Path) -> Result<(), String> {
     Err("当前平台暂不支持本机共享防火墙授权。".into())
 }
 
@@ -1399,26 +1462,91 @@ fn open_host_accessibility_settings() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn reveal_host_app(app: &Path) -> Result<(), String> {
+fn check_local_network_permission(ip: std::net::Ipv4Addr) -> Result<(), String> {
+    extern "C" {
+        fn soluna_local_network_denied(host: *const std::ffi::c_char) -> bool;
+    }
+    let host = std::ffi::CString::new(ip.to_string()).expect("IPv4 has no embedded NUL");
+    if unsafe { soluna_local_network_denied(host.as_ptr()) } {
+        return Err("LOCAL_NETWORK_DENIED".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_local_network_settings() -> Result<(), String> {
+    let manual = "请手动前往“系统设置 > 隐私与安全性 > 本地网络”。";
     let status = Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(app)
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
         .status()
-        .map_err(|error| format!("无法在 Finder 中显示 Sunshine.app：{error}"))?;
+        .map_err(|error| format!("无法打开本地网络设置：{error}。{manual}"))?;
     if !status.success() {
-        return Err("无法在 Finder 中显示 Sunshine.app。".into());
+        return Err(format!("无法打开本地网络设置。{manual}"));
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn reveal_host_app(_app: &Path) -> Result<(), String> {
+fn open_local_network_settings() -> Result<(), String> {
     Err("此操作仅适用于 macOS。".into())
 }
 
 #[cfg(target_os = "macos")]
+fn host_accessibility_status() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(target_os = "macos")]
+fn watch_accessibility_grant(app: &tauri::AppHandle, backend: &Arc<Backend>) -> Result<(), String> {
+    if backend.watching_accessibility.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let app = app.clone();
+    let state = Arc::clone(backend);
+    std::thread::Builder::new()
+        .name("soluna-accessibility-grant".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(300);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_secs(1));
+                if !host_accessibility_status() {
+                    continue;
+                }
+                let Ok(_operation) = state.host_operation.try_lock() else {
+                    continue;
+                };
+                let Ok(host) = state.host.try_lock() else {
+                    continue;
+                };
+                let Ok(client) = state.client.try_lock() else {
+                    continue;
+                };
+                if !matches!(host.phase(), "starting" | "running" | "stopping")
+                    && client.operation_id.is_none()
+                {
+                    app.request_restart();
+                    return;
+                }
+            }
+            state.watching_accessibility.store(false, Ordering::Release);
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            backend
+                .watching_accessibility
+                .store(false, Ordering::Release);
+            format!("无法监测辅助功能授权；授权后请手动退出并重新打开 SolunaRemote：{error}")
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_accessibility_status() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
 fn reveal_soluna_app() -> Result<(), String> {
-    let app = macos_application_firewall_path()?;
+    let app = macos_application_bundle_path()?;
     let status = Command::new("/usr/bin/open")
         .arg("-R")
         .arg(app)
@@ -1438,7 +1566,7 @@ fn reveal_soluna_app() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn prepare_macos_sunshine(resources: &Path, user_data: &Path) -> Result<Option<PathBuf>, String> {
     let host_resources = resources.join("host");
-    let archive = host_resources.join("Sunshine.app.zip");
+    let archive = host_resources.join("soluna-host.zip");
     if !archive.is_file() {
         return Ok(None);
     }
@@ -1449,7 +1577,7 @@ fn prepare_macos_sunshine(resources: &Path, user_data: &Path) -> Result<Option<P
     )
     .map_err(|error| format!("Sunshine 发行信息无效：{error}"))?;
     let archive_manifest: Value = serde_json::from_slice(
-        &std::fs::read(host_resources.join("Sunshine.app.zip.json"))
+        &std::fs::read(host_resources.join("soluna-host.zip.json"))
             .map_err(|error| format!("无法读取 Sunshine 资源校验信息：{error}"))?,
     )
     .map_err(|error| format!("Sunshine 资源校验信息无效：{error}"))?;
@@ -1471,41 +1599,134 @@ fn prepare_macos_sunshine(resources: &Path, user_data: &Path) -> Result<Option<P
         return Err("内置 Sunshine 与此 Mac 的处理器架构不匹配。".into());
     }
     let archive_sha256 = sha256_file(&archive)?;
+    let expected_archive_sha256 = option_env!("SOLUNA_MAC_HOST_ARCHIVE_SHA256")
+        .ok_or_else(|| "程序缺少本地 Sunshine 的完整性校验信息。".to_string())?;
     if archive_manifest["version"] != version
         || archive_manifest["architecture"].as_str() != Some(architecture)
+        || archive_sha256 != expected_archive_sha256
         || archive_manifest["sha256"].as_str() != Some(archive_sha256.as_str())
+        || archive_manifest["cdhash"].as_str() != option_env!("SOLUNA_MAC_HOST_CDHASH")
     {
-        return Err("内置 Sunshine 资源校验失败。".into());
+        return Err("内置共享引擎资源校验失败。".into());
+    }
+    let app = std::env::current_exe()
+        .map_err(|error| format!("无法定位应用程序：{error}"))?
+        .ancestors()
+        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("app"))
+        .map(Path::to_path_buf);
+    let (executable, assets) = if let Some(app) = app {
+        let contents = app.join("Contents");
+        (
+            contents.join("MacOS").join("soluna-host"),
+            contents.join("Resources").join("assets"),
+        )
+    } else {
+        let executable = prepare_macos_development_host(&archive, user_data, version)?;
+        let contents = executable
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "开发版共享引擎目录无效。".to_string())?
+            .to_path_buf();
+        (executable, contents.join("Resources").join("assets"))
+    };
+    if !assets.join("desktop.png").is_file() || !assets.join("box.png").is_file() {
+        return Err("SolunaRemote 应用包缺少共享引擎资源。".into());
+    }
+    verify_macos_sunshine(&executable)?;
+    Ok(Some(executable))
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_macos_development_host(
+    archive: &Path,
+    user_data: &Path,
+    version: &str,
+) -> Result<PathBuf, String> {
+    let directory = user_data.join("host").join("development").join(version);
+    let contents = directory.join("Contents");
+    let executable = contents.join("MacOS").join("soluna-host");
+    if executable.is_file() {
+        return Ok(executable);
+    }
+    if directory.exists() {
+        return Err("已有的开发版共享引擎目录不完整；请先检查该目录。".into());
     }
 
-    let destination = user_data
-        .join("host")
-        .join("bundled")
-        .join(version)
-        .join("Sunshine.app");
-    if destination.exists() {
-        verify_macos_sunshine(&destination)?;
-        return Ok(Some(destination));
-    }
-    let parent = destination
+    let parent = directory
         .parent()
-        .ok_or_else(|| "Sunshine 安装目录无效。".to_string())?;
+        .ok_or_else(|| "开发版共享引擎目录无效。".to_string())?;
     std::fs::create_dir_all(parent)
-        .map_err(|error| format!("无法创建 Sunshine 安装目录：{error}"))?;
-    let output = Command::new("/usr/bin/ditto")
-        .args(["-x", "-k"])
-        .arg(&archive)
-        .arg(parent)
-        .output()
-        .map_err(|error| format!("无法解压内置 Sunshine：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "无法解压内置 Sunshine：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    verify_macos_sunshine(&destination)?;
-    Ok(Some(destination))
+        .map_err(|error| format!("无法创建开发版共享引擎目录：{error}"))?;
+    let temporary = parent.join(format!(".soluna-host-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&temporary)
+        .map_err(|error| format!("无法创建临时共享引擎目录：{error}"))?;
+    let result = (|| {
+        let extracted = temporary.join("extracted");
+        let output = Command::new("/usr/bin/ditto")
+            .args(["-x", "-k"])
+            .arg(archive)
+            .arg(&extracted)
+            .output()
+            .map_err(|error| format!("无法解压开发版共享引擎：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "无法解压开发版共享引擎：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let payload = extracted.join("soluna-host");
+        let source_executable = payload.join("soluna-host");
+        let source_frameworks = payload.join("Frameworks");
+        let source_assets = payload.join("assets");
+        if !source_assets.join("desktop.png").is_file() || !source_assets.join("box.png").is_file()
+        {
+            return Err("开发版共享引擎归档缺少必要资源。".into());
+        }
+        verify_macos_sunshine(&source_executable)?;
+
+        let package = temporary.join("package");
+        let package_contents = package.join("Contents");
+        let package_executable = package_contents.join("MacOS").join("soluna-host");
+        let package_frameworks = package_contents.join("Frameworks");
+        let package_assets = package_contents.join("Resources").join("assets");
+        std::fs::create_dir_all(
+            package_executable
+                .parent()
+                .ok_or_else(|| "开发版主机目录无效。".to_string())?,
+        )
+        .map_err(|error| format!("无法创建开发版主机目录：{error}"))?;
+        std::fs::create_dir_all(&package_frameworks)
+            .map_err(|error| format!("无法创建开发版依赖目录：{error}"))?;
+        std::fs::create_dir_all(&package_assets)
+            .map_err(|error| format!("无法创建开发版资源目录：{error}"))?;
+        for (source, destination) in [
+            (&source_executable, &package_executable),
+            (&source_frameworks, &package_frameworks),
+            (&source_assets, &package_assets),
+        ] {
+            let copied = Command::new("/usr/bin/ditto")
+                .arg(source)
+                .arg(destination)
+                .output()
+                .map_err(|error| format!("无法复制开发版共享引擎资源：{error}"))?;
+            if !copied.status.success() {
+                return Err(format!(
+                    "无法复制开发版共享引擎资源：{}",
+                    String::from_utf8_lossy(&copied.stderr).trim()
+                ));
+            }
+        }
+        verify_macos_sunshine(&package_executable)?;
+        std::fs::rename(&package, &directory)
+            .map_err(|error| format!("无法安装开发版共享引擎：{error}"))?;
+        Ok(executable.clone())
+    })();
+    let cleanup = std::fs::remove_dir_all(&temporary)
+        .map_err(|error| format!("无法清理临时共享引擎目录：{error}"));
+    let executable = result?;
+    cleanup?;
+    Ok(executable)
 }
 
 #[cfg(target_os = "macos")]
@@ -1531,37 +1752,42 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn verify_macos_sunshine(app: &Path) -> Result<(), String> {
-    let executable = app.join("Contents").join("MacOS").join("Sunshine");
+fn verify_macos_sunshine(executable: &Path) -> Result<(), String> {
     if !executable.is_file() {
-        return Err("Sunshine.app 缺少可执行程序。".into());
+        return Err("SolunaRemote 应用包缺少共享引擎。".into());
     }
     let verification = Command::new("/usr/bin/codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(app)
+        .args(["--verify", "--strict"])
+        .arg(executable)
         .output()
-        .map_err(|error| format!("无法验证 Sunshine.app 签名：{error}"))?;
+        .map_err(|error| format!("无法验证共享引擎签名：{error}"))?;
     if !verification.status.success() {
         return Err(format!(
-            "Sunshine.app 签名无效：{}",
+            "共享引擎签名无效：{}",
             String::from_utf8_lossy(&verification.stderr).trim()
         ));
     }
     let identity = Command::new("/usr/bin/codesign")
         .args(["-dv", "--verbose=4"])
-        .arg(app)
+        .arg(executable)
         .output()
-        .map_err(|error| format!("无法读取 Sunshine.app 签名：{error}"))?;
+        .map_err(|error| format!("无法读取共享引擎签名：{error}"))?;
     let details = format!(
         "{}{}",
         String::from_utf8_lossy(&identity.stdout),
         String::from_utf8_lossy(&identity.stderr)
     );
+    let expected = option_env!("SOLUNA_MAC_HOST_CDHASH")
+        .ok_or_else(|| "程序缺少本地 Sunshine 的签名校验信息。".to_string())?;
     if !identity.status.success()
-        || !details.contains("Identifier=dev.lizardbyte.app.Sunshine")
-        || !details.contains("TeamIdentifier=F8XQ7XCN2R")
+        || !details
+            .lines()
+            .any(|line| line == "Identifier=local.solunaremote.desktop")
+        || !details
+            .lines()
+            .any(|line| line.strip_prefix("CDHash=") == Some(expected))
     {
-        return Err("Sunshine.app 未通过预期的官方开发者身份验证。".into());
+        return Err("SolunaRemote 应用包中的共享引擎与本地构建的签名不匹配。".into());
     }
     Ok(())
 }
@@ -1571,6 +1797,34 @@ fn base64_utf16(value: &str) -> String {
     let bytes: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn native_executable(resources: &Path) -> Result<PathBuf, String> {
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    {
+        let _ = resources;
+        std::env::current_exe().map_err(|error| format!("无法定位应用程序：{error}"))
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "embedded-sunshine")))]
+    {
+        let name = if cfg!(target_os = "windows") {
+            "soluna-stream.exe"
+        } else {
+            "soluna-stream"
+        };
+        Ok(resources.join("native").join(name))
+    }
+}
+
+fn native_available(executable: &Path) -> bool {
+    if !executable.is_file() {
+        return false;
+    }
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    return embedded::component_exists(executable, embedded::STREAM_DLL);
+    #[cfg(not(all(target_os = "windows", feature = "embedded-sunshine")))]
+    true
 }
 
 fn validate_native_path(path: &str) -> Result<String, String> {
@@ -1667,6 +1921,41 @@ fn window_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the prepared local macOS Sunshine resources"]
+    fn macos_local_host_stages_one_helper_and_rejects_replaced_archives() {
+        let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let root = std::env::temp_dir().join(format!("soluna-host-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let helper = prepare_macos_sunshine(&resources, &root).unwrap().unwrap();
+        assert!(helper.is_file());
+        assert!(!helper
+            .ancestors()
+            .any(|path| path.extension().and_then(|extension| extension.to_str()) == Some("app")));
+        let copy = root.join("resources").join("host");
+        std::fs::create_dir_all(&copy).unwrap();
+        for name in ["soluna-host.zip", "soluna-host.zip.json", "release.json"] {
+            std::fs::copy(resources.join("host").join(name), copy.join(name)).unwrap();
+        }
+        let archive = copy.join("soluna-host.zip");
+        let mut bytes = std::fs::read(&archive).unwrap();
+        bytes.push(0);
+        std::fs::write(archive, bytes).unwrap();
+        assert!(prepare_macos_sunshine(&root.join("resources"), &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backend_startup_wakes_waiters_and_reports_initialization_failure() {
+        let startup = Arc::new(BackendStartup::default());
+        let waiter = Arc::clone(&startup);
+        let thread = std::thread::spawn(move || waiter.wait().err());
+        startup.finish(Err("初始化失败".into()));
+        assert_eq!(thread.join().unwrap().as_deref(), Some("初始化失败"));
+        assert_eq!(startup.wait().err().as_deref(), Some("初始化失败"));
+    }
+
     #[test]
     fn late_connection_events_do_not_revert_streaming_phase() {
         let mut session = json!({"phase": "starting"});
@@ -1762,7 +2051,7 @@ mod tests {
 
     #[test]
     fn macos_firewall_requires_an_exact_allowed_app_path() {
-        let app = Path::new("/Users/test/Library/Application Support/SolunaRemote/Sunshine.app");
+        let app = Path::new("/Applications/SolunaRemote.app/Contents/MacOS/soluna-host");
         let allowed = format!(
             "Total number of apps = 1\n1 : {}\n             (Allow incoming connections)\n",
             app.display()
@@ -1786,7 +2075,109 @@ mod tests {
     }
 }
 
+fn initialize_backend(app: &tauri::AppHandle) -> Result<Backend, String> {
+    let user_data = user_data_dir()?;
+    std::fs::create_dir_all(&user_data).map_err(|error| error.to_string())?;
+    let store = store::Store::open(&user_data)?;
+    let access = access::AccessState::open(&user_data.join("access"))?;
+    let resources = bundled_resources(app)?;
+    #[cfg(target_os = "macos")]
+    let sunshine_host = prepare_macos_sunshine(&resources, &user_data)?;
+    #[cfg(not(all(target_os = "windows", feature = "embedded-sunshine")))]
+    let host_name = if cfg!(target_os = "windows") {
+        "sunshine.exe"
+    } else {
+        "sunshine"
+    };
+    #[cfg(all(
+        not(all(target_os = "windows", feature = "embedded-sunshine")),
+        target_os = "macos"
+    ))]
+    let host_executable = sunshine_host
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| resources.join("host").join(host_name));
+    #[cfg(all(
+        not(all(target_os = "windows", feature = "embedded-sunshine")),
+        not(target_os = "macos")
+    ))]
+    let host_executable = resources.join("host").join(host_name);
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    let host = host_runtime::HostRuntime::new_embedded(
+        user_data.join("host"),
+        std::env::current_exe().map_err(|error| error.to_string())?,
+        resources.join("host"),
+    );
+    #[cfg(not(all(target_os = "windows", feature = "embedded-sunshine")))]
+    let host = host_runtime::HostRuntime::new(user_data.join("host"), host_executable);
+    Ok(Backend {
+        store: Mutex::new(store),
+        access: Mutex::new(access),
+        access_server: Mutex::new(None),
+        discovery: Mutex::new(None),
+        host: Arc::new(Mutex::new(host)),
+        host_operation: Mutex::new(()),
+        #[cfg(target_os = "macos")]
+        watching_accessibility: AtomicBool::new(false),
+        control: Arc::new(Mutex::new(host_control::HostControl::new(
+            user_data.join("identity"),
+        ))),
+        client: Arc::new(Mutex::new(ClientRuntime::new())),
+        statuses: Mutex::new(HashMap::new()),
+        resources,
+    })
+}
+
 fn main() {
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--soluna-stream")) {
+        use std::os::windows::ffi::OsStrExt;
+        let mut args = std::env::args_os()
+            .enumerate()
+            .filter(|(index, _)| *index != 1)
+            .map(|(_, arg)| {
+                arg.encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut pointers = args
+            .iter_mut()
+            .map(|arg| arg.as_mut_ptr())
+            .collect::<Vec<_>>();
+        let argc = i32::try_from(pointers.len()).expect("too many stream arguments");
+        pointers.push(std::ptr::null_mut());
+        let result = embedded::run_stream(argc, pointers.as_mut_ptr()).unwrap_or_else(|error| {
+            println!("{}", json!({"event": "error", "message": error}));
+            1
+        });
+        std::process::exit(result);
+    }
+    #[cfg(all(target_os = "windows", feature = "embedded-sunshine"))]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--sunshine-host")) {
+        let args = std::env::args_os()
+            .enumerate()
+            .filter(|(index, _)| *index != 1)
+            .map(|(_, arg)| {
+                std::ffi::CString::new(
+                    arg.into_string()
+                        .expect("Sunshine arguments must be valid Unicode"),
+                )
+                .expect("Sunshine arguments must not contain NUL")
+            })
+            .collect::<Vec<_>>();
+        let mut pointers = args
+            .iter()
+            .map(|arg| arg.as_ptr().cast_mut())
+            .collect::<Vec<_>>();
+        let argc = i32::try_from(pointers.len()).expect("too many Sunshine arguments");
+        pointers.push(std::ptr::null_mut());
+        let result = embedded::run_host(argc, pointers.as_mut_ptr()).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            1
+        });
+        std::process::exit(result);
+    }
     #[cfg(all(target_os = "windows", not(feature = "microsoft-store")))]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1820,43 +2211,16 @@ fn main() {
             }
         })
         .setup(|app| {
-            let user_data = user_data_dir().map_err(std::io::Error::other)?;
-            std::fs::create_dir_all(&user_data).map_err(std::io::Error::other)?;
-            let store = store::Store::open(&user_data).map_err(std::io::Error::other)?;
-            let access = access::AccessState::open(&user_data.join("access"))
-                .map_err(std::io::Error::other)?;
-            let resources = bundled_resources(app.handle()).map_err(std::io::Error::other)?;
-            #[cfg(target_os = "macos")]
-            let sunshine_app =
-                prepare_macos_sunshine(&resources, &user_data).map_err(std::io::Error::other)?;
-            #[cfg(not(target_os = "macos"))]
-            let sunshine_app: Option<PathBuf> = None;
-            let host_name = if cfg!(target_os = "windows") {
-                "sunshine.exe"
-            } else {
-                "sunshine"
-            };
-            let host_executable = sunshine_app
-                .as_ref()
-                .map(|app| app.join("Contents").join("MacOS").join("Sunshine"))
-                .unwrap_or_else(|| resources.join("host").join(host_name));
-            app.manage(Backend {
-                store: Mutex::new(store),
-                access: Mutex::new(access),
-                access_server: Mutex::new(None),
-                discovery: Mutex::new(None),
-                host: Arc::new(Mutex::new(host_runtime::HostRuntime::new(
-                    user_data.join("host"),
-                    host_executable,
-                ))),
-                host_operation: Mutex::new(()),
-                control: Arc::new(Mutex::new(host_control::HostControl::new(
-                    user_data.join("identity"),
-                ))),
-                client: Arc::new(Mutex::new(ClientRuntime::new())),
-                statuses: Mutex::new(HashMap::new()),
-                resources,
-                sunshine_app,
+            let startup = Arc::new(BackendStartup::default());
+            app.manage(Arc::clone(&startup));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let result =
+                    tauri::async_runtime::spawn_blocking(move || initialize_backend(&handle))
+                        .await
+                        .map_err(|error| format!("后端初始化失败：{error}"))
+                        .and_then(|result| result);
+                startup.finish(result);
             });
             Ok(())
         })
@@ -1865,8 +2229,15 @@ fn main() {
 
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            if let Some(backend) = app.try_state::<Backend>() {
-                if let Err(error) = cancel_client(backend.inner(), None) {
+            if let Some(startup) = app.try_state::<Arc<BackendStartup>>() {
+                let backend = startup.result.lock().ok().and_then(|result| {
+                    result
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .cloned()
+                });
+                let Some(backend) = backend else { return };
+                if let Err(error) = cancel_client(&backend, None) {
                     eprintln!("无法停止客户端串流：{error}");
                 }
                 match backend.host.lock() {
@@ -1876,7 +2247,7 @@ fn main() {
                         }
                     }
                     Err(_) => eprintln!("无法停止 Sunshine：主机状态不可用。"),
-                }
+                };
             }
         }
     });

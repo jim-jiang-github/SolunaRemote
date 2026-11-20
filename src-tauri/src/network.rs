@@ -304,12 +304,88 @@ fn request_stream<S: Read + Write>(
     )
     .and_then(|_| stream.write_all(body))
     .map_err(|error| format!("发送请求失败：{error}"))?;
-    let mut response = Vec::new();
-    stream
-        .take(1_048_577)
-        .read_to_end(&mut response)
-        .map_err(|error| format!("读取主机响应失败：{error}"))?;
+    let response = read_framed_response(stream)?;
     parse_http_response(&response)
+}
+
+pub(crate) fn read_framed_response(stream: &mut impl Read) -> Result<Vec<u8>, String> {
+    const LIMIT: usize = 1_048_576;
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        read_response_bytes(stream, &mut response, 1, LIMIT)?;
+    }
+    let headers =
+        std::str::from_utf8(&response).map_err(|_| "主机返回无效 HTTP 响应头。".to_string())?;
+    let mut content_length = None;
+    let mut chunked = false;
+    for line in headers.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some() {
+                    return Err("主机返回重复的响应长度。".into());
+                }
+                content_length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "主机返回无效响应长度。".to_string())?,
+                );
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                    return Err("主机返回不支持的响应编码。".into());
+                }
+                chunked = true;
+            }
+        }
+    }
+    if chunked && content_length.is_some() {
+        return Err("主机返回冲突的响应长度。".into());
+    }
+    if let Some(length) = content_length {
+        read_response_bytes(stream, &mut response, length, LIMIT)?;
+    } else if chunked {
+        loop {
+            let start = response.len();
+            while !response[start..].ends_with(b"\r\n") {
+                read_response_bytes(stream, &mut response, 1, LIMIT)?;
+            }
+            let length = std::str::from_utf8(&response[start..response.len() - 2])
+                .ok()
+                .and_then(|line| line.split(';').next())
+                .and_then(|line| usize::from_str_radix(line.trim(), 16).ok())
+                .ok_or_else(|| "主机返回无效分块长度。".to_string())?;
+            let length_with_terminator = length
+                .checked_add(2)
+                .ok_or_else(|| "主机分块响应超过大小限制。".to_string())?;
+            read_response_bytes(stream, &mut response, length_with_terminator, LIMIT)?;
+            if !response.ends_with(b"\r\n") {
+                return Err("主机返回无效分块结束标记。".into());
+            }
+            if length == 0 {
+                break;
+            }
+        }
+    } else {
+        return Err("主机未提供响应长度。".into());
+    }
+    Ok(response)
+}
+
+fn read_response_bytes(
+    stream: &mut impl Read,
+    response: &mut Vec<u8>,
+    count: usize,
+    limit: usize,
+) -> Result<(), String> {
+    let start = response.len();
+    let end = start
+        .checked_add(count)
+        .filter(|end| *end <= limit)
+        .ok_or_else(|| "主机响应超过大小限制。".to_string())?;
+    response.resize(end, 0);
+    stream
+        .read_exact(&mut response[start..])
+        .map_err(|error| format!("读取主机响应失败：{error}"))
 }
 
 fn parse_http_response(response: &[u8]) -> Result<(u16, Vec<u8>), String> {
@@ -570,6 +646,28 @@ pub fn discover_code(code: &str, duration: Duration) -> Result<Target, String> {
 mod tests {
     use super::*;
     use std::net::{Shutdown, TcpListener};
+
+    #[test]
+    #[ignore = "requires an isolated running Sunshine host"]
+    fn embedded_sunshine_https_response() {
+        let certificate = std::fs::read(std::env::var_os("SOLUNA_TEST_CERT").unwrap()).unwrap();
+        let port = std::env::var("SOLUNA_TEST_HTTPS_PORT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let (status, _) = request_https(
+            Ipv4Addr::LOCALHOST,
+            port,
+            "GET",
+            "/api/pin",
+            None,
+            Duration::from_secs(5),
+            Some(&certificate),
+            None,
+        )
+        .unwrap();
+        assert_eq!(status, 307);
+    }
 
     fn read_request_headers(stream: &mut TcpStream) {
         let mut headers = Vec::new();

@@ -154,10 +154,14 @@ test-results/
 playwright-report/
 native/.tools/
 native/build/
+native/build-embedded-ucrt64/
 native/bin/
 host/bin/
 host/bin-macos/
 host/.sunshine-macos-*/
+host/bin-macos-local/
+host/build-macos-local/
+host/.sunshine-local-*/
 /vm-ssh-setup
 /src-tauri/resources/
 /src-tauri/target/

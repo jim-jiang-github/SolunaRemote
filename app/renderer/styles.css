@@ -726,6 +726,13 @@ button:not(:disabled):active {
   flex-basis: 100%;
   margin: 0;
 }
+.local-network-help {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 #recent-connections {
   width: 130px;
   max-width: 40%;
@@ -1801,6 +1808,7 @@ dialog::backdrop {
 [data-icon-theme="dark"] .device-card,
 [data-icon-theme="dark"] .desktop-card,
 [data-icon-theme="dark"] .shortcut-card,
+[data-icon-theme="dark"] .empty-state,
 [data-icon-theme="dark"] .settings-section,
 [data-icon-theme="dark"] dialog {
   background-color: #172338;
