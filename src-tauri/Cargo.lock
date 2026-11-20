@@ -3343,6 +3343,8 @@ dependencies = [
  "tauri-build",
  "url",
  "uuid",
+ "windows",
+ "windows-collections",
  "x509-parser",
 ]
 

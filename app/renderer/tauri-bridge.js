@@ -88,11 +88,14 @@
         "revealSolunaApp",
         "openLink",
         "window",
+        "checkStoreUpdates",
       ]);
 
       async function call(method, input) {
         if (!allowed.has(method)) throw new Error("不支持的操作。");
         if (method === "openLink") return invoke("open_link", { key: input });
+        if (method === "checkStoreUpdates")
+          return invoke("check_store_updates");
         if (method === "openSunshine") {
           const url = await invoke("backend_call", {
             method: "sunshineUrl",

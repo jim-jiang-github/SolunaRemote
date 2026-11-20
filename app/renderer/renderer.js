@@ -731,6 +731,18 @@
     .then((data) => {
       if (!applyState(data))
         throw new Error("应用未返回有效状态，请退出后重新打开。");
+      if (data.microsoftStoreBuild) {
+        window.lan
+          .call("checkStoreUpdates")
+          .then((updateAvailable) => {
+            if (updateAvailable)
+              notify("微软商店发现可用更新，请在弹出的确认窗口中完成安装。");
+          })
+          .catch((error) => {
+            console.error("Microsoft Store 更新检查失败：", error);
+            notify("暂时无法检查 Microsoft Store 更新，请稍后重试。");
+          });
+      }
       return actions.refresh();
     })
     .catch((error) => {

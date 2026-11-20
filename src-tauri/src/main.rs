@@ -9,6 +9,8 @@ mod host_runtime;
 mod network;
 mod process;
 mod store;
+#[cfg(feature = "microsoft-store")]
+mod store_updates;
 mod validation;
 
 use ring::rand::SecureRandom;
@@ -169,6 +171,7 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
     Ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "platform": if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "windows") { "windows" } else { "other" },
+        "microsoftStoreBuild": cfg!(feature = "microsoft-store"),
         "devices": devices,
         "settings": data.settings,
         "engines": {
@@ -193,6 +196,19 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
         "session": client.session.clone(),
         "local": { "hostname": std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default() },
     }))
+}
+
+#[tauri::command]
+async fn check_store_updates(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(feature = "microsoft-store")]
+    {
+        return store_updates::check_and_request(app).await;
+    }
+    #[cfg(not(feature = "microsoft-store"))]
+    {
+        let _ = app;
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -1778,6 +1794,7 @@ fn main() {
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             backend_call,
+            check_store_updates,
             open_link,
             open_external,
             window_action
