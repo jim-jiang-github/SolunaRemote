@@ -6,10 +6,6 @@ const crypto = require("node:crypto");
 const { execFile, spawn } = require("node:child_process");
 const https = require("node:https");
 const { promisify } = require("node:util");
-const {
-  certificateSignature,
-  request,
-} = require("../app/core/host-control.cjs");
 const { testIdentity } = require("./fixtures/identity.cjs");
 const execute = promisify(execFile);
 const executable = path.resolve(
@@ -78,7 +74,6 @@ async function main() {
         crypto.createPrivateKey(key),
       ),
     );
-    assert.equal(certificateSignature(cert).length, 256);
     const serverIdentity = testIdentity();
     const server = https.createServer(
       {
@@ -95,17 +90,34 @@ async function main() {
     );
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
-      const response = await request(
-        { ip: "127.0.0.1", httpsPort: server.address().port },
-        "pair",
-        {},
-        {
-          secure: true,
-          serverCert: serverIdentity.cert,
-          identity: { cert, key },
-        },
-      );
-      assert.equal(response.paired, "1");
+      const response = await new Promise((resolve, reject) => {
+        const request = https.get(
+          {
+            host: "127.0.0.1",
+            port: server.address().port,
+            path: "/pair",
+            ca: serverIdentity.cert,
+            cert,
+            key,
+            checkServerIdentity: (_hostname, peer) =>
+              peer.raw.equals(serverIdentity.x509.raw)
+                ? undefined
+                : new Error("Unexpected test server certificate"),
+          },
+          (result) => {
+            let body = "";
+            result.setEncoding("utf8");
+            result.on("data", (chunk) => (body += chunk));
+            result.on("error", reject);
+            result.on("end", () =>
+              resolve({ status: result.statusCode, body }),
+            );
+          },
+        );
+        request.on("error", reject);
+      });
+      assert.equal(response.status, 200);
+      assert.match(response.body, /<paired>1<\/paired>/);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

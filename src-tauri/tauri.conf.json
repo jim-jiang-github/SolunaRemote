@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "SolunaRemote",
-        "width": 1300,
-        "height": 900,
-        "minWidth": 940,
-        "minHeight": 680,
+        "width": 867,
+        "height": 600,
+        "minWidth": 867,
+        "minHeight": 600,
         "decorations": false,
         "backgroundColor": "#f6f8fc"
       }

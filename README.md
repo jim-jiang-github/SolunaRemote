@@ -5,14 +5,22 @@
 [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) 使用。
 
 v0.4 是同一个程序里的服务端与客户端，**无需单独安装 Sunshine 或 Moonlight**。
-用户仅输入 **12 位设备码 + 访问密码**，不展示、不要求输入四位配对码。
+用户仅输入 **9 位设备码 + 访问密码**，不展示、不要求输入四位配对码。
 「本机共享」启动随包 Sunshine 子进程，自动完成底层协议授权，退出即停止，不注册系统服务、
 不安装驱动。客户端使用自行编译的 **soluna-stream** 原生进程，无需外部客户端：
-Tauri/WebView2 显示界面，随包 Node.js 后端复用现有配对与应用逻辑；
+Tauri/WebView2 显示界面，Rust 提供原生后端；
 moonlight-common-c 处理 GameStream；FFmpeg 解码，SDL2
 负责独立窗口、音频输出与键鼠，Opus 解码双声道音频。
 
-采用浅色双栏、设备详情、桌面入口和快速启动布局，品牌、图标组合和桌面插画为本项目原创，不包含网易 UU 的标识、壁纸或其他素材。原来的浏览器设备清单原型已替换为桌面应用。
+**Rust 后端已接通设备码密码验证、Sunshine 配对与启动、原生串流进程和取消流程。**
+设备与设置管理、Sunshine 子进程启停及固定证书的本机管理 API、TLS-PSK 访问认证、
+设备码 mDNS 广播、服务端内部 PIN 配对、远端控制协议和 SDL 串流生命周期现由 Rust
+后端管理。两台 Windows 测试虚拟机已实际连接并收到 1920×1080 首帧，客户端使用软件解码；
+键盘输入、鼠标移动及单击和音频包已在两台 Windows 虚拟机间验证；实际扬声器出声和不同网络防火墙环境尚未完成验收。
+旧 Node.js 后端已移除；Node.js 仅用于部分开发与测试工具，不是运行依赖。
+旧后端的专用单元测试不再运行，其中部分协议测试尚未迁移至 Rust。
+
+采用浅色远程协助布局，当前本地版只提供远程协助页面和设置，不展示账号式「我的设备」或独立的本机共享入口。页面集中显示本机设备 ID、访问密码与共享状态、伙伴设备连接表单和本机最近连接记录；数据仅保存在当前用户的本机目录中。品牌、图标组合和桌面插画为本项目原创，不包含网易 UU 的标识、壁纸或其他素材。
 
 ## 开发与运行
 
@@ -21,11 +29,12 @@ moonlight-common-c 处理 GameStream；FFmpeg 解码，SDL2
 官方来源和许可证保留，不将上游项目冒充为本项目。
 
 此目录使用独立的 `%APPDATA%\SolunaRemote` 配置，不自动搬运旧版本的设备、
-证书或访问密码。两端都应使用本版本，并重新设置共享密码、授权控制端内网地址；
+证书或访问密码。两端都应使用本版本，并重新设置共享密码；
 新品牌的密码派生标识和发现服务与旧测试版本不互通。原目录及原配置保留不动。
+从旧版升级时，原 12 位设备码会迁移为 9 位码并清除旧派生密钥；请在「远程协助」页面重新设置访问密码，并让连接双方更新到本版本。
 
-源码开发需要 Node.js（推荐 Node.js 24 LTS）、Rust stable、Visual Studio C++ Build Tools
-和 WebView2 Runtime。Tauri 窗口使用系统 WebView2；随包 Node.js 仅作为不向界面开放权限的本地后端。
+源码开发与 JavaScript 自动化测试需要 Node.js（推荐 Node.js 24 LTS）、Rust stable、Visual Studio C++ Build Tools
+和 WebView2 Runtime。已打包应用使用 Rust 后端；Node.js 仅用于开发脚本和自动化测试，不是运行依赖。
 
 ```powershell
 npm ci
@@ -35,24 +44,18 @@ npm start
 ```
 
 `npm start` 启动 Tauri 开发版；`npm run dist` 生成 Tauri NSIS 安装包。
-如需对照旧 Electron 构建，可运行 `npm run start:electron` 或 `npm run dist:electron`。
-这次迁移替换了桌面壳和 IPC，设备、配对、TLS 与主机逻辑仍由 Node sidecar 执行；
-因此性能对比反映 Electron/Chromium 与 Tauri/WebView2 壳的差异，不代表后端已改写为 Rust。
+Tauri/WebView2 负责桌面界面，Rust 进程直接运行本地后端；前端 JavaScript 和 Sunshine 的管理页面资源随应用提供，不需要 Node.js 运行时。
 应用无需前端开发服务器或云端账号。直接在普通浏览器打开渲染页不会获得桌面桥接权限。
 
 ```powershell
 npm test
 npm run lint
 npm run format:check
-npm run test:e2e
 npm run test:native
 node tests\native-ui.cjs
-npm run benchmark:desktop
+npm run test:tauri
+npm run test:portable
 npm run dist:tauri
-npm run dist:electron
-npm run pack
-node tests\packaged-smoke.cjs
-node tests\packaged-smoke.cjs release\SolunaRemote-0.4.0-windows-x64.exe --portable
 ```
 
 原生构建需要 Visual Studio 2026 C++ 桌面开发工具和 Git。`scripts\build-native.ps1`
@@ -61,21 +64,117 @@ node tests\packaged-smoke.cjs release\SolunaRemote-0.4.0-windows-x64.exe --porta
 依赖构建可能耗时较长。可设置 `VCPKG_ROOT` 复用已有 vcpkg。
 
 `dist:tauri` 生成 `src-tauri\target\release\bundle\nsis` 下的安装包，随包带有
-Node.js 后端运行时、原生客户端和 Sunshine 引擎；用户数据仍存于 `%APPDATA%\SolunaRemote`。
-`dist:electron` 生成 `release\SolunaRemote-0.4.0-windows-x64.exe` 便携包，供性能对照。
-`pack` 保留旧 Electron 解包构建流程。
-`prepare:host` 固定版本与官方 SHA256，打包前检查引擎；不运行上游安装程序。
+原生客户端和 Sunshine 引擎；发行包不携带 Node.js runtime、`node_modules` 或 JavaScript 后端；用户数据仍存于 `%APPDATA%\SolunaRemote`。
+Windows 直接运行目录必须同时包含 `SolunaRemote.exe`、同级的
+`libssl-3-x64.dll`、`libcrypto-3-x64.dll` 和 `vcruntime140.dll`，以及完整的 `resources` 目录。
+其中两个 OpenSSL DLL 应与构建 Rust 应用时使用的版本一致，不能只依赖开发机的 PATH。
+准备好原生引擎、Sunshine 和 Tauri 资源后，可以不使用 Node.js 或安装包构建新的直接运行目录：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-direct.ps1 -OutputDirectory release\SolunaRemote-direct
+```
+
+输出目录必须尚不存在，避免覆盖已有文件。
+Rust Release 配置启用体积优化。`prepare:host` 固定 Sunshine 版本与官方 SHA256，
+打包前检查引擎；不运行上游安装程序。
 Sunshine 官方二进制包含静态 Qt 托盘支持，本程序关闭该托盘；因此「客户端无 Qt」
 不代表官方服务端二进制内部也完全没有 Qt。用户只使用 SolunaRemote 界面。
-构建未做代码签名，Windows 可能提示未知发布者。Electron `packaged-smoke` 使用独立临时目录。
+构建未做代码签名，Windows 可能提示未知发布者。
 
-macOS 源码构建入口为 `native\CMakeLists.txt`，需要 CMake、SDL2、FFmpeg、Opus、OpenSSL、
-nlohmann-json（建议同一 vcpkg 工具链）；配置、构建后将可执行文件及动态库置于 `native\bin`。
-macOS 的 VideoToolbox、窗口、权限、签名和分发尚未实测，不能视为已支持的发行包。
+### Microsoft Store / MSIX
+
+`npm run dist:msix` 使用 Windows SDK 的 MakeAppx 构建 x64 MSIX，不使用 NSIS。
+当前 MSIX 首版最低支持 Windows 11（10.0.22000），使用系统提供的 Evergreen WebView2 Runtime；
+运行时仍需保留 WebView2，组织精简镜像应单独验证。现有 NSIS / 直接运行版的系统要求不变。
+需先完成 `npm run build:native` 和 `npm run prepare:host`，并安装 Windows 11 SDK。
+脚本会准备资源、以独立的 `microsoft-store` Cargo feature 和 target 目录编译，再验证并打包清单。
+不复用普通版已编译的 EXE，避免把提权流程误打进商店包。
+打包前还会检查所有 EXE/DLL 的 x64 架构和 PE 证书目录范围。
+当前上游 Sunshine `v2026.914.233613` lite 包的 EXE 含有指向文件之外的无效证书目录，
+会令 MSIX 签名返回 `0x800700C1`，即使 MakeAppx 和 WACK 静态检查通过也会发生。
+脚本仅对 SHA256 精确匹配的已知文件，在 MSIX 暂存副本中清空该无效目录的 8 字节；
+不改动代码段、不移除有效签名，也不修改 `host\bin` 原始文件。其他文件的无效目录会直接阻止打包。
+MSIX 还包含仅有 `.keep` 的 `resources\host\config` 目录：
+Sunshine 启动时无条件检查程序旁的该目录，缺失时会尝试在只读的 WindowsApps 中创建并失败。
+实际配置、证书与日志仍通过绝对路径写入用户数据目录，不从开发机复制任何 Sunshine 用户配置。
+
+尚未取得 Partner Center 身份时，只能生成明确标注的未签名预览包：
+
+```powershell
+npm run dist:msix -- -Preview -OutputDirectory release\SolunaRemote-msix-preview
+```
+
+预览包不能提交商店，也不能直接作为普通用户可安装的正式版本分发。
+正式包的身份必须与 Partner Center 的“产品管理 > 产品标识”一致；自动发布工作流已配置当前产品身份：
+
+```powershell
+npm run dist:msix -- -IdentityName "<Package/Identity/Name>" -Publisher "<Package/Identity/Publisher>" -PublisherDisplayName "<PublisherDisplayName>" -Version 1.0.3.0 -OutputDirectory release\SolunaRemote-msix-store
+```
+
+输出目录必须尚不存在。生成的 `*.msix` 未签名，可通过身份匹配的 Partner Center 产品提交；
+商店通过审核后为分发包签名，无需在仓库中存放证书。默认包版本由 `package.json` 版本追加 `.0` 得到，
+也可传 `-Version 1.0.0.0`；四段均须在 0–65535 内，商店包第一段必须大于 0，最后一段固定为 0。
+仓库内部应用版本仍为 0.x，而商店当前版本为 1.0.2.0，所以正式商店打包必须显式指定更高的包版本；预览包仍可使用 0.x。
+`layout` 子目录保留原始包内容，便于 Windows App Certification Kit 和安装验证。
+
+#### GitHub Actions 自动提交
+
+`.github\workflows\publish-microsoft-store.yml` 在推送 `vMAJOR.MINOR.PATCH` 格式的 tag 时，
+会构建 x64 MSIX 并提交到 Microsoft Store。例如 `v1.0.3` 会生成包版本 `1.0.3.0`。
+当前已发布版本为 `1.0.2.0`，因此 tag 必须更高。
+
+在 GitHub 仓库 **Settings > Secrets and variables > Actions** 中添加
+`AZURE_AD_TENANT_ID`、`AZURE_AD_APPLICATION_CLIENT_ID`、`AZURE_AD_APPLICATION_SECRET` 和
+`SELLER_ID`。对应 Entra 应用需要已在 Partner Center 授权并具有 Manager 角色。
+不要把这些凭据写入仓库或 tag。
+
+该流程会提交商店审核；实际上架时间仍由 Microsoft 认证流程决定。Microsoft Store Developer CLI
+当前仅支持免费商品的自动更新。仅在所有需要发布的源代码与构建脚本都已提交后创建并推送 release tag。
+
+商店版不会调用管理员提权或 PowerShell 防火墙脚本。
+MSIX 清单通过 `windows.firewallRules` 为本应用的 TCP 47991 / UDP 5353，
+以及内置 Sunshine 的 TCP 47984 / 47989 / 48010、UDP 47998–48000 / 48002 声明入站规则；
+不开放 Web 管理端口 47990，不安装驱动、服务或上游管理工具。
+规则仅覆盖专用和域网络，**不放行公用网络**。
+此清单机制不支持普通版规则的 `LocalSubnet` 来源限定；它按程序、端口和网络配置文件限制，
+不能视为相同的子网边界，组织策略和其他阻止规则仍可能阻止访问。
+如果网络不是你信任的局域网，不要将其改成专用网络来开启共享。
+
+打包成功不等于已通过商店认证：提交时需要说明 `runFullTrust` 用于桌面捕获、键鼠控制和启动随包引擎，
+并准备隐私政策、第三方许可证、商店素材及已安装 MSIX 的实际双机串流验证。
+无商店身份或测试签名时，仅能检查清单、包完整性和解包后应用启动；
+不能据此宣称安装、包身份或防火墙注册已经验证。不要为测试关闭系统签名校验。
+解包后可运行 `node tests\packaged-smoke.cjs <解包目录>\SolunaRemote.exe --msix`，
+检查依赖、界面启动、后端商店构建标记和导航，但这不替代安装态测试。
+
+macOS 源码构建入口为 `native/CMakeLists.txt`，需要 CMake、SDL2、FFmpeg、Opus、OpenSSL、
+nlohmann-json 和 pkg-config。安装 Node.js 后可在 Mac 上运行 `npm run prepare:host:macos`
+下载并校验官方 Sunshine（Apple Silicon 或 Intel），再运行 `npm run start:tauri:macos`
+启动 Tauri 开发版，或 `npm run dist:tauri:macos` 构建 DMG。Tauri 资源准备会构建并包含
+原生 `soluna-stream`，同时保留 Sunshine.app 的签名；首次运行会将 Sunshine 复制到当前用户的
+应用支持目录，并在启动前再次验证官方签名。
+
+macOS 本机共享不强制开启系统防火墙；防火墙关闭时直接继续启动，不要求防火墙授权。
+若防火墙已开启，需在“系统设置 > 网络 > 防火墙”选项中允许
+Finder 定位到的 Sunshine.app 与 SolunaRemote.app。点击开启共享后，若检查未通过，应用会显示授权说明。
+用户点击“打开防火墙设置”后自行操作，再点击“重新检查并开启共享”；只有检查通过才启动。
+定位按钮按需显示当前版本的两个应用，取消不会启动共享。应用不会代替用户开启防火墙或添加规则。
+开启共享前会提示用户为内置 Sunshine 授予辅助功能权限（部分 macOS 版本称为“设备控制和数据访问”），
+并提供权限设置和 Sunshine.app 定位入口；该提示不能验证 Sunshine 的授权状态，用户可以取消或继续。
+开启共享时会提前请求屏幕录制权限，无需等待客户端连接；如果系统没有弹出提示，请在
+“隐私与安全性 > 屏幕录制”中为 SolunaRemote 授权。Sunshine 还需要辅助功能权限；
+这些权限必须由用户明确授予。Sunshine 的 macOS 支持仍属实验性，此入口用于测试，不代表
+macOS 已完成发行验收、代码签名、公证或 GitHub Actions 打包验证。
 
 ## Windows 虚拟机 SSH 部署入口
 
-将项目中的 **`vm-ssh-setup` 整个文件夹复制到 Windows 11 测试虚拟机**（建议放在桌面），双击里面的 **`START.bat`**，在 Windows 管理员权限提示中选择“是”。不要在宿主机运行。文件夹包含 BAT 入口、自动提权启动脚本、SSH 配置脚本、公钥和 `settings.json`，不含私钥，也不需要 Node.js。启动脚本会安装 `solunaremote-vm-v2.pub`；与它匹配的私钥应留在连接端。
+先在**连接端电脑**双击 `vm-ssh-setup\PREPARE-HOST.bat`，按提示为新私钥设置口令。
+脚本在本机用户目录下的受限文件夹生成私钥，并将对应公钥放入 `vm-ssh-setup`；
+输出会列出私钥路径。只复制 `vm-ssh-setup` 文件夹到目标机，私钥留在连接端，不能放进脚本或复制到虚拟机。
+目标机仍只需运行一次 `START.bat`（除非 Windows 安装功能后要求重启）。脚本追加新公钥，
+不替换已有授权。连接前仍须通过可信控制台核对目标机的主机密钥指纹。
+
+将整个 `vm-ssh-setup` 文件夹复制到 Windows 11 测试虚拟机（建议放在桌面），双击里面的 **`START.bat`**，在 Windows 管理员权限提示中选择“是”。不要在宿主机运行。文件夹包含 BAT 入口、自动提权启动脚本、SSH 配置脚本、公钥和 `settings.json`，不含私钥，也不需要 Node.js。启动脚本会安装 `solunaremote-vm-v2.pub`；与它匹配的私钥应留在连接端。
 
 完成后窗口会保留结果；同目录的 `setup.log` 记录本次执行详情，包含用户名、虚拟机 IP 和主机密钥指纹。失败或取消权限授权会明确报错，不会显示成功。若需要另一管理员账号授权，SSH 用户是实际批准提权的本地管理员账号。
 
@@ -108,19 +207,16 @@ ssh -i $key -o IdentitiesOnly=yes -o "UserKnownHostsFile=$knownHosts" -o StrictH
 ```
 
 首次连接必须通过可信的虚拟机控制台核对 SHA256 指纹后再保存信任记录，不能关闭主机密钥校验。
-私钥和已核验的主机记录不在项目中；本会话没有原先部署会话的私钥。找不到文件时应恢复原有文件，
-或由虚拟机管理员明确授权安装新公钥，不能将“TCP 22 可达”当作已登录。
+私钥和已核验的主机记录不在项目中。应使用准备部署文件夹时输出的私钥路径，或恢复先前的私钥；
+找不到时可由虚拟机管理员授权安装新公钥，不能将“TCP 22 可达”当作已登录。
 
-本机到虚拟机的只读复测命令：
+本机可用以下只读命令检查虚拟机 SSH 端口：
 
 ```powershell
-node scripts\test-vm.cjs 172.22.98.13
-node scripts\test-vm.cjs 172.22.98.13 --identity $key --known-hosts $knownHosts --user 'windev2407eval\user'
+Test-NetConnection VM_IP -Port 22
 ```
 
-输出 JSON 包含 TCP 22、GameStream HTTP/HTTPS、管理端口及真实 `/serverinfo` 探测。
-只有明确提供原有身份和信任文件才执行 SSH `whoami`，始终启用严格主机密钥检查。
-探测失败返回非零退出码；不会安装软件、修改证书、跳过授权或修改防火墙。
+端口可达不代表 SSH 已认证，实际登录仍需使用上面的严格主机密钥验证命令。
 
 连接成功后，可以复制当前版本的便携包（不在 SSH 会话中启动桌面 GUI）：
 
@@ -136,24 +232,31 @@ scp -i $key -o IdentitiesOnly=yes $artifact 'User@VM_IP:C:/SolunaRemote/'
 
 ## 两台电脑的首次连接
 
-1. **被控电脑**：启动同一个 SolunaRemote，在「本机共享」设置至少 12 个字符的访问密码，然后开启共享。页面显示当前设备码。输入控制端私有 IPv4，点击授权设备访问并确认管理员提示。仅放行该地址的串流端口、TCP 47991 密码认证和 UDP 5353 设备发现，不开放 Web 管理端口，不关闭防火墙。
+1. **被控电脑**：启动同一个 SolunaRemote，在「远程协助」页面查看本机 9 位设备 ID 和临时密码，或设置固定密码（非空即可，无需复杂度组合；最多 128 个字符），再开启协助。临时密码保存在内存中，应用重启时刷新，**不会在每次远控结束时自动刷新**。Windows 上新设的固定密码使用当前用户的系统数据保护加密保存，可重启后查看；旧版只保存派生密钥的密码不能找回，须重新设置才能查看。其他系统的固定密码仅在本次运行中可查看。Windows 开启共享前会检查当前应用路径对应的防火墙规则；缺少授权时先显示说明，点击“授权并开启共享”后才请求 Windows 管理员权限。批准后仅添加或启用本应用和内置 Sunshine 所需的本地子网入站规则，包含串流端口、TCP 47991 密码认证和 UDP 5353 设备发现，不开放 Web 管理端口、不关闭防火墙。规则复查通过才启动共享，已生效的规则不重复请求授权；取消、授权失败或规则未生效会明确报错，组织策略和其他阻止规则仍可能影响连接。
 2. **控制电脑**：启动 SolunaRemote，使用随包 soluna-stream；源码版先运行 `npm run build:native`。首次建议 H.264、720p、30 FPS。
-3. 点击「设备码连接」，填写对方的设备码和访问密码。设备码编码所选内网 IPv4 与校验位，可直接解析，不依赖组播、不扫描网段、不访问云注册中心。mDNS 保留为辅助发现机制。
-4. 双方通过标准 TLS 1.2 ECDHE-PSK + ChaCha20-Poly1305 验证密码并加密控制请求，不依赖未知自签名证书。PSK 由 scrypt（N=32768, r=8, p=1）从密码与设备码派生；密码本身不传输、不保存。程序内部使用随机一次性标识和临时 PIN 完成 Sunshine 原生授权，用户不参与此步骤。
+
+   密码验证成功后，最近连接会记住该设备的密码，选择设备时自动填充。Windows 使用当前用户的系统数据保护加密保存；其他系统仅在当前应用运行期间记住。删除设备会删除其已保存密码。旧连接记录没有保存过的密码，需要重新连接一次；对方的临时密码刷新后也需重新输入。
+
+3. 在「远程协助」页面填写对方的 9 位设备 ID 和访问密码，点击「连接」。设备 ID 可在本地校验并解析，不依赖组播、不扫描网段、不访问云注册中心。应用自动选择系统默认网络；mDNS 保留为辅助发现机制。连接记录会显示在同页的「最近连接」中。
+4. 双方通过标准 TLS 1.2 ECDHE-PSK + ChaCha20-Poly1305 验证密码并加密控制请求，不依赖未知自签名证书。PSK 由 scrypt（N=32768, r=8, p=1）从密码与设备码派生；密码本身不传输。Windows 固定密码使用系统数据保护加密存储。程序内部使用随机一次性标识和临时 PIN 完成 Sunshine 原生授权，用户不参与此步骤。
 5. 点击「进入桌面」，在独立的 SDL 窗口使用远程桌面。按 `Ctrl + Alt + F12` 或关闭窗口退出。只有收到并实际渲染首帧才显示串流成功。
 
 Windows 会话窗口使用紧凑浅色顶栏，显示远端设备名、桌面标签、实际连接状态和连接时长。
 「控制中心」可切换全屏、静音、开关性能悬浮层及断开连接；顶栏支持拖动、边缘缩放、
 最小化与最大化，操作顶栏不会把点击发给远端。性能层显示实际渲染 FPS、收到的编码视频码率、
 协议 RTT 和 Opus 包数，不是示例数据；码率不包含网络开销，RTT 不是端到端画面延迟。
-第一版是单桌面串流，不提供多显示器切换；macOS 暂保留 SDL 原生标题栏，尚未验证。
+Windows 串流窗口支持远端多显示器切换：标题栏可快速切换显示屏 1–3，
+「控制中心」的显示屏网格可选 1–12。切换通过 Sunshine 的
+`Ctrl+Alt+Shift+F1` 至 `Ctrl+Alt+Shift+F12` 热键发送；显示屏数量由被控端决定，
+超出实际屏幕数量的编号不会产生有效画面。macOS 暂保留 SDL 原生标题栏，尚未验证。
 `node tests\native-ui.cjs` 使用合成 H.264 / Opus 驱动真实 SDL 窗口，实际点击控制中心、
 性能开关和断开连接并保存截图；不代表真实远端键鼠、网络或扬声器出声已验证。
 
 `tests\live-password.cjs` 是显式启用的真实虚拟机联调入口，不属于模拟测试：
-它使用隔离客户端配置，通过 SSH 的本地 CDP 转发操作测试虚拟机中的同一应用，
+它启动 Tauri 客户端并使用隔离配置，通过 SSH 的本地 CDP 转发操作测试虚拟机中的同一应用，
 验证错误密码被拒绝、正确密码连接、实际渲染帧以及真实鼠标点击和键盘输入。
 此测试会更新虚拟机测试配置的访问密码并在结束时停止共享；不要用于日常配置。
+`test:portable` 启动 Release 文件夹中的 Tauri EXE，检查随包资源、后端和页面导航。
 运行原生 UI 自动化期间不要切换本地焦点；测试只允许向已核验的所属原生窗口注入输入，
 失去前台焦点会终止，截图也要求该窗口保持前台。联调不证明扬声器有声或 macOS 支持。
 
@@ -165,21 +268,21 @@ Windows 会话窗口使用紧凑浅色顶栏，显示远端设备名、桌面标
 访问密码派生密钥保存在当前用户的 `access\access.json`，它也是敏感凭据，不要分享。
 每次开启共享会撤销以前的 Sunshine 客户端证书授权，连接必须重新验证访问密码。
 密码只能在停止共享时修改，修改后下次开启生效。密码错误会拒绝连接；服务端限制每个地址
-每分钟至多 10 次 TLS 连接和 8 个同时连接。强随机密码仍然必要：PSK 身份认证不能让弱密码免受离线猜测。
-设备码不是公网 ID，也不是全球注册的永久身份；它对应所选网卡的内网 IP。
-在「共享网卡」选择与控制端互通的接口；DHCP 或网卡变化后须停止共享、重新选择网卡并设置密码，
-设备码也会改变。跨子网是否可达取决于内网路由和防火墙，不通过云端补救。
+每分钟至多 10 次 TLS 连接和 8 个同时连接。密码不强制复杂度组合，但 PSK 身份认证不能让弱密码免受离线猜测，建议使用难猜的密码。
+设备 ID 不是公网 ID，也不是全球注册的永久身份；它由应用根据系统默认网络生成。
+应用会自动选择系统默认路由，不需要手动选择网卡。默认网络变化后，设备 ID 会更新，
+并需要重新保存访问密码。跨子网是否可达取决于网络路由和防火墙，不通过云端补救。
 
 ### 串流与配对状态的边界
 
 - 在线状态来自实际 HTTP `/serverinfo` GameStream XML 检测，不是模拟数据。显示的“探测 ms”包含连接与 HTTP 耗时，**不是**视频串流延迟。
-- Node 主进程实现 Sunshine 第 7 代配对、双向证书 HTTPS、应用列表和 launch/resume；证书只在完整 PIN 证明成功后保存。
+- Rust 客户端流程通过 TLS-PSK 验证设备码与密码，并行完成受 PIN 保护的 Sunshine 配对，固定主机证书后查询应用并请求 launch/resume；Windows 双虚拟机已验证首帧、键盘输入和鼠标移动及单击。
 - 对每台主机固定其证书，不使用全局 TLS 验证关闭开关。证书变化会报错，需要确认主机身份后重新配对。
 - 进程配置（含临时输入加密密钥）通过 stdin 传递，不写入命令行、日志或 renderer；stdout 使用有界 JSON 事件报告连接阶段、首帧及帧数。
-- 串流打开 **独立 SDL 窗口**；Electron 不嵌入渲染表面。当前使用 SDR/YUV420、双声道、绝对鼠标和常用键盘按键；没有剪贴板、IME 文本同步或手柄。
+- 串流打开 **独立 SDL 窗口**，不嵌入桌面界面。当前使用 SDR/YUV420、双声道、绝对鼠标和常用键盘按键；没有剪贴板、IME 文本同步或手柄。
 - Windows 尝试 FFmpeg D3D11VA，macOS 代码路径尝试 VideoToolbox，不可用时明确报告并使用软件解码。硬解码帧需要 CPU 拷贝到 SDL，**不是零拷贝**。默认 auto 首版选择 H.264；HEVC/AV1 取决于双方编解码器。
-- 配对 90 秒总超时，串流有无首帧超时；进程启动或 HTTP 在线不等于连接成功。原生 self-test 使用自行生成的 H.264 I_PCM 图像与 Opus 静音，验证本机解码、SDL 窗口和音频排队，不证明真实网络、硬解码、扬声器有声或远端输入。
-- 一次只管理一个本工具的串流或配对；取消通过 stdin 请求退出，超时只终止已跟踪子进程，不按进程名清理，不关闭远端应用。若主机有其他应用运行则拒绝启动，不强制抢占。
+- Sunshine 内部 PIN 授权有 20 秒等待上限，原生串流在 30 秒内未收到首帧会报错；进程启动或 HTTP 在线不等于连接成功。原生 self-test 使用自行生成的 H.264 I_PCM 图像与 Opus 静音，验证本机解码、SDL 窗口和音频排队，不证明真实网络、硬解码、扬声器有声或远端输入。
+- 一次只管理一个本工具的串流或配对；取消会中止当前操作或通过 stdin 请求原生进程退出，协议调用可能要等当前网络超时后才完全停止。不按进程名清理，不关闭远端应用。若主机有其他应用运行则拒绝启动，不强制抢占。
 - 快速启动只能选择 Sunshine 已配置的应用名称，不会在远端执行脚本或任意命令。
 
 ## 仅内网的约束
@@ -189,15 +292,16 @@ Windows 会话窗口使用紧凑浅色顶栏，显示远端设备名、桌面标
 应用不注册公网服务，不做 NAT 穿透、网段扫描、云中转或自动更新。mDNS 查询仅作用于本地组播。外部 GitHub 发布页仅在你主动点击下载按钮时由系统浏览器打开。
 
 **这不代替操作系统的网络策略。** 内置主机禁用 UPnP，禁止路由器端口转发。
-防火墙按钮只在用户明确操作并批准管理员权限后添加/更新本应用规则，限制到一个指定内网地址；
+开启共享时，仅在需要且用户批准管理员权限后添加/更新本应用规则，来源限制为 Windows 定义的 `LocalSubnet`；
 不会删除已有组织规则，因此应检查是否存在其他宽泛规则。规则在停止共享后保留，
-但本应用子进程会退出、停止监听。私有地址也可能经过 VPN；不强制二层同一子网。
+但本应用子进程会退出、停止监听。规则适用于所有防火墙配置文件，`LocalSubnet` 可能包括公共网络或 VPN 接口的本地子网，并非严格限制为私有 IPv4。
 原生客户端再次拒绝公网目标，RTSP 地址必须匹配已校验主机。
 
 ## 已实现
 
-- Tauri 原生窗口和受限命令桥接；Node 后端作为独立进程运行，渲染器没有 Node.js 权限。
-- 手动添加 / 移除设备、收藏、搜索、按设备保存的快速启动。
+- Tauri 原生窗口和受限命令桥接；Rust 后端在应用进程内运行，渲染器没有 Node.js 权限。
+- 单页远程协助、本机设备 ID 与共享控制、伙伴设备连接和本地最近连接记录，不依赖账号或联网服务。
+- 连接成功后保留本机设备记录、收藏和按设备保存的快速启动。
 - 原子写入的设备与串流配置持久化；损坏文件保留并明确报错，不静默清空。
 - mDNS 查找 Sunshine、手动刷新和每 15 秒的可见窗口状态检测。
 - 原生引擎启动、实际 PIN 协议、首帧状态、取消与进程退出处理。
@@ -209,19 +313,16 @@ Windows 会话窗口使用紧凑浅色顶栏，显示远端设备名、桌面标
 
 ## 数据与测试
 
-设备及设置存储于 Electron `app.getPath("userData")` 下的 `devices.json`；
-Windows 默认为 `%APPDATA%\SolunaRemote\devices.json`。
-`identity` 子目录保存独立客户端私钥、证书及按主机地址保存的已验证证书。不要分享此目录。Windows 使用当前用户目录的 ACL，其他系统创建私钥文件为 0600、目录为 0700。本工具不读取已有 Moonlight 身份；旧 `moonlightPath` 仅保留以免破坏原有数据，新版本使用 `nativePath`，留空选择随包引擎。旧 HTML localStorage 不自动迁移。
+设备及设置存储于 `%APPDATA%\SolunaRemote\devices.json`。
+`identity` 子目录保存独立客户端私钥、证书及按主机地址保存的已验证证书。不要分享此目录。Windows 使用当前用户目录的 ACL，其他系统创建私钥文件为 0600、目录为 0700。本工具不读取已有 Moonlight 身份；原生客户端始终使用随包引擎，不提供可执行文件路径设置。旧 `moonlightPath` 会保留以兼容已有数据，旧 HTML localStorage 不自动迁移。
 
 需要独立配置时，可以通过 `--user-data-dir=C:\absolute\profile` 指定绝对数据目录；这不会迁移或覆盖原有配置。便携 EXE 默认仍使用当前系统用户的应用数据目录，并不将配对凭据放在 EXE 旁。
 
 单元测试覆盖内网、DNS、持久化、原生生命周期、内部挑战签名、固定证书及 launch/resume；
-访问密码测试使用真实 TLS-PSK 握手，并在 Node/OpenSSL 与 Electron/BoringSSL 中分别运行，
-包括错误密码拒绝、正确密码成功和敏感信息不进入状态快照。协议测试仍不等于真实 Sunshine。
-Electron UI 测试使用真实窗口和独立临时目录，明确模拟设备码发现、密码认证、控制 API 与原生 JSON 播放器；
-覆盖设备码入口、错误密码阻止启动、成功连接/停止、状态恢复、本机密码/共享开关、设置持久化与移除。
+访问密码测试使用真实 TLS-PSK 握手与 Node/OpenSSL，包括错误密码拒绝、正确密码成功和敏感信息不进入状态快照。
+`test:tauri` 启动真实 Tauri/WebView2 界面和后端，并探测指定虚拟机；协议测试仍不等于真实 Sunshine 串流。
 
-UI 测试不等于真实 Sunshine / Moonlight 串流验证。真实双机的 PIN 授权、画面/声音、硬件编解码、键鼠、UDP 连接质量及平台打包签名需在安装引擎后实测。测试截图输出到 `test-results`，不写入应用数据目录。
+UI 测试不等于完整的真实串流验收。双虚拟机已验证配对、首帧、键盘、鼠标移动及单击和接收音频包；其他鼠标操作、实际扬声器出声、硬件编解码、UDP 连接质量及平台打包签名仍需实测。测试截图输出到 `test-results`，不写入应用数据目录。
 
 ## 上游许可
 

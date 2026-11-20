@@ -1,0 +1,52 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="256"
+  height="256"
+  viewBox="0 0 256 256"
+  fill="none"
+>
+  <defs>
+    <linearGradient id="sun" x1="56" y1="95" x2="114" y2="153">
+      <stop stop-color="#FFE69A" />
+      <stop offset="1" stop-color="#F2C96B" />
+    </linearGradient>
+    <linearGradient id="moon" x1="155" y1="103" x2="202" y2="157">
+      <stop stop-color="#9DA7B9" />
+      <stop offset="1" stop-color="#6D7A94" />
+    </linearGradient>
+  </defs>
+  <rect
+    x="34"
+    y="40"
+    width="188"
+    height="150"
+    rx="17"
+    fill="#1B2E5B"
+    stroke="#B6DFF1"
+    stroke-opacity=".9"
+    stroke-width="5"
+  />
+  <rect x="41" y="47" width="174" height="136" rx="12" fill="#F4F8FC" />
+  <path
+    d="M104 207h48m-24-17v17"
+    stroke="#B6DFF1"
+    stroke-linecap="round"
+    stroke-width="6"
+  />
+  <circle cx="128" cy="193" r="2.5" fill="#B6DFF1" />
+  <g stroke="#F5D17A" stroke-linecap="round" stroke-width="4">
+    <path
+      d="M85 82v7M85 159v7M43 124h7M120 124h7M60 99l-6-6M110 99l6-6M110 149l6 6M60 149l-6 6"
+    />
+  </g>
+  <circle cx="85" cy="124" r="29" fill="url(#sun)" />
+  <circle cx="171" cy="128" r="18" fill="url(#moon)" />
+  <circle cx="180" cy="120" r="16" fill="#F4F8FC" />
+  <path
+    d="m128 61 19 19-10 1 5 10-6 3-5-11-6 7z"
+    fill="#F4FCFF"
+    stroke="#132345"
+    stroke-linejoin="round"
+    stroke-width="3"
+  />
+</svg>

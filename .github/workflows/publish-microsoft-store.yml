@@ -1,0 +1,136 @@
+name: Publish Microsoft Store
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: microsoft-store-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      STORE_IDENTITY_NAME: 21715JimJiang.SolunaRemote
+      STORE_PUBLISHER: CN=637A899D-E295-4D14-92B7-DCA009B34A94
+      STORE_PUBLISHER_DISPLAY_NAME: Jim Jiang
+      STORE_PRODUCT_ID: 9N59ZZL73M2B
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+
+      - name: Validate tag and Store credentials
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)$') {
+            throw 'Release tags must use vMAJOR.MINOR.PATCH, for example v1.0.3.'
+          }
+
+          $parts = @(
+            [int]$Matches['major'],
+            [int]$Matches['minor'],
+            [int]$Matches['patch']
+          )
+          if ($parts[0] -eq 0 -or ($parts | Where-Object { $_ -gt 65535 })) {
+            throw 'The Store package version requires a positive major and components no greater than 65535.'
+          }
+
+          $version = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+          if ([version]$version -le [version]'1.0.2.0') {
+            throw 'The release tag must be newer than the currently published Store version 1.0.2.0.'
+          }
+          "MSIX_VERSION=$version" >> $env:GITHUB_ENV
+
+          $requiredSecrets = @(
+            'AZURE_AD_TENANT_ID',
+            'AZURE_AD_APPLICATION_CLIENT_ID',
+            'AZURE_AD_APPLICATION_SECRET',
+            'SELLER_ID'
+          )
+          $missingSecrets = @($requiredSecrets | Where-Object {
+            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          })
+          if ($missingSecrets.Count -gt 0) {
+            throw "Configure these GitHub Actions secrets before tagging a release: $($missingSecrets -join ', ')."
+          }
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build native engine
+        shell: pwsh
+        run: ./scripts/build-native.ps1
+
+      - name: Prepare Sunshine host
+        shell: pwsh
+        run: ./scripts/prepare-host.ps1
+
+      - name: Build Store MSIX
+        shell: pwsh
+        run: |
+          $outputDirectory = Join-Path $env:RUNNER_TEMP 'SolunaRemote-msix-store'
+          ./scripts/build-msix.ps1 `
+            -IdentityName $env:STORE_IDENTITY_NAME `
+            -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME `
+            -Version $env:MSIX_VERSION `
+            -OutputDirectory $outputDirectory
+
+          $packages = @(Get-ChildItem -LiteralPath $outputDirectory -Filter '*.msix' -File)
+          if ($packages.Count -ne 1) {
+            throw "Expected one MSIX package, found $($packages.Count)."
+          }
+          "MSIX_PATH=$($packages[0].FullName)" >> $env:GITHUB_ENV
+
+      - name: Save MSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SolunaRemote-${{ github.ref_name }}-msix
+          path: ${{ runner.temp }}/SolunaRemote-msix-store/*.msix
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Set up Microsoft Store CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.1
+        with:
+          version: v0.4.4
+
+      - name: Configure Partner Center credentials
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          msstore reconfigure `
+            --tenantId $env:AZURE_AD_TENANT_ID `
+            --sellerId $env:SELLER_ID `
+            --clientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
+            --clientSecret $env:AZURE_AD_APPLICATION_SECRET
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Store CLI credential configuration failed.'
+          }
+
+      - name: Submit update to Microsoft Store
+        shell: pwsh
+        run: |
+          msstore publish $env:MSIX_PATH --appId $env:STORE_PRODUCT_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Store submission failed.'
+          }

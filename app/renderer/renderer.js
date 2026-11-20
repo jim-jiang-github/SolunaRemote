@@ -2,16 +2,38 @@
 (async () => {
   const content = document.querySelector("#content");
   let state;
-  let route = "devices";
+  let route = "assist";
   let selectedId = null;
-  let search = "";
-  let discovery = [];
-  let connectShortcut = null;
+  let partnerCode = "";
+  let partnerPassword = "";
+  let partnerPasswordRequest = 0;
+  let localPassword = "";
+  let localPasswordVisible = false;
   let connecting = false;
+  let hostTogglePending = false;
   let removeId = null;
   let toastTimer;
   let refreshing = false;
-  let scanning = false;
+  const themeToggle = document.querySelector("#theme-toggle");
+  const themeStorageKey = "soluna-icon-theme";
+
+  function setIconTheme(theme) {
+    const isDark = theme === "dark";
+    document.documentElement.dataset.iconTheme = isDark ? "dark" : "light";
+    themeToggle?.setAttribute("aria-pressed", String(isDark));
+    themeToggle?.setAttribute(
+      "aria-label",
+      isDark ? "切换到浅色主题" : "切换到深色主题",
+    );
+    themeToggle?.setAttribute(
+      "title",
+      isDark ? "切换到浅色主题" : "切换到深色主题",
+    );
+  }
+
+  setIconTheme(
+    localStorage.getItem(themeStorageKey) === "dark" ? "dark" : "light",
+  );
 
   const escape = (value) =>
     String(value ?? "").replace(
@@ -53,48 +75,65 @@
     }, 6500);
   }
 
+  function showStateLoadError(error) {
+    content.innerHTML = `<div class="empty-state" role="alert"><h2>无法加载应用状态</h2><p>${escape(error.message)}</p>${button("重试", "retry-state")}</div>`;
+  }
+
   function applyState(next) {
+    if (!next || typeof next !== "object" || typeof next.version !== "string") {
+      console.error("Ignoring invalid application state snapshot:", next);
+      return false;
+    }
+    const active = document.activeElement;
+    const activeId = active?.id;
+    const selection =
+      typeof active?.selectionStart === "number"
+        ? [active.selectionStart, active.selectionEnd]
+        : null;
     state = next;
+    document.documentElement.dataset.appReady = "true";
     if (selectedId && !selected()) {
       selectedId = null;
-      route = "devices";
+      route = "assist";
     }
     renderSidebar();
     if (route === "host" && document.activeElement?.closest("#host-controls"))
       return;
-    if (route !== "settings" || !document.querySelector("#settings-form"))
+    if (route !== "settings" || !document.querySelector("#settings-form")) {
       renderContent();
+      const restored = activeId && document.getElementById(activeId);
+      if (restored) {
+        restored.focus();
+        if (selection && typeof restored.setSelectionRange === "function")
+          restored.setSelectionRange(...selection);
+      }
+    }
+    return true;
   }
 
   function renderSidebar() {
-    document.querySelector("#nav-count").textContent = String(
-      state.devices.length,
-    );
-    document.querySelector("#local-name").textContent = state.local.hostname;
-    document.querySelector("#app-version").textContent = `v${state.version}`;
+    document.querySelector("#app-version").textContent = state?.version
+      ? `v${state.version}`
+      : "";
     document
-      .querySelectorAll("[data-route]")
+      .querySelectorAll("[data-route], [data-nav-route]")
       .forEach((element) =>
-        element.classList.toggle("active", element.dataset.route === route),
+        element.classList.toggle(
+          "active",
+          (element.dataset.route || element.dataset.navRoute) === route,
+        ),
       );
-    document.querySelector("#sidebar-devices").innerHTML = state.devices.length
-      ? state.devices
-          .map(
-            (device) =>
-              `<button class="sidebar-device ${selectedId === device.id && route === "detail" ? "active" : ""}" data-device="${escape(device.id)}" title="${escape(device.name)}"><span class="device-mini">${icon("monitor")}</span><span class="sidebar-device-name">${escape(device.name)}</span><span class="dot ${deviceOnline(device) ? "green" : ""}"></span></button>`,
-          )
-          .join("")
-      : `<p class="sidebar-placeholder">还没有设备<br/>添加一台电脑，开始内网连接。</p>`;
-    document.querySelector("#statusbar-text").textContent = state.session
+    document.querySelector("#statusbar-text").textContent = state?.session
       ? state.session.phase === "streaming"
         ? `正在串流 · 已渲染 ${state.session.stats?.rendered ?? 1} 帧`
         : state.session.kind === "pair"
           ? "正在验证设备访问权限"
           : "正在建立原生串流 · 等待首帧"
-      : "安全连接，从你的局域网开始";
+      : "";
   }
 
   function navigate(next, deviceId) {
+    partnerPasswordRequest++;
     route = next;
     if (deviceId) selectedId = deviceId;
     renderSidebar();
@@ -116,24 +155,61 @@
     return `<div class="session-banner"><span>${icon("signal")} <strong>${label}</strong> · ${escape(device?.name || "设备")}${state.session.kind === "stream" ? ` / ${escape(state.session.app)}` : ""}</span>${button("结束本次进程", "stop", "secondary")}</div>`;
   }
 
-  function features() {
-    return `<div class="feature-hints"><div class="feature-hint">${icon("shield")}<div><strong>只在你的内网</strong><p>私有 IPv4 校验，无公网中转。</p></div></div><div class="feature-hint">${icon("signal")}<div><strong>为低延迟而生</strong><p>Sunshine 编码，Moonlight 解码。</p></div></div><div class="feature-hint">${icon("key")}<div><strong>设备码与密码</strong><p>加密验证，不传输明文密码。</p></div></div></div>`;
-  }
-
-  function deviceCard(device) {
-    return `<article class="device-card"><div class="device-card-header"><span class="status-pill ${deviceOnline(device) ? "online" : ""}"><span class="dot ${deviceOnline(device) ? "green" : ""}"></span>${statusLabel(device)}</span><button class="small-icon-button ${device.favorite ? "starred" : ""}" data-action="favorite" data-id="${escape(device.id)}" aria-label="${device.favorite ? "取消收藏" : "收藏"} ${escape(device.name)}">${icon("star")}</button></div><button class="device-open" data-device="${escape(device.id)}"><span class="card-monitor">${icon("monitor")}</span><h3>${escape(device.name)}</h3><p>${escape(device.address)}</p></button><div class="card-footer"><span>${deviceOnline(device) ? `探测 ${device.status.latency} ms · GameStream` : "Sunshine 主机"}</span>${icon("arrow")}</div></article>`;
-  }
-
   function overview() {
-    const favorites = route === "favorites";
-    const devices = state.devices.filter(
-      (device) =>
-        (!favorites || device.favorite) &&
-        `${device.name} ${device.address}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-    );
-    return `${sessionBanner()}<div class="page-heading"><div><h1>${favorites ? "收藏设备" : "你的设备，随时连接"}</h1><p>${favorites ? "把常用的电脑放在触手可及的位置。" : "同一个程序，同时作为服务端和客户端。"}</p></div><div class="heading-buttons">${button("设备码连接", "connect-code", "primary", "link")}${button("发现设备", "discover", "secondary", "search")}${button("添加设备", "add", "secondary", "plus")}</div></div><div class="overview-banner"><div><h2>熟悉的桌面，不必就在身边。</h2><p>输入对方的设备码与访问密码，即可连接内网桌面。<br/>无需注册账号，无需另装 Sunshine 或 Moonlight。</p></div><span class="banner-icon">${icon("monitor")}</span></div><div class="section-label"><h2>${favorites ? "我的收藏" : "全部设备"}</h2><span class="count-pill">${devices.length}</span><span class="spacer"></span><input id="device-search" class="search-input" aria-label="搜索设备" placeholder="搜索名称或内网地址" value="${escape(search)}"/></div>${devices.length ? `<div class="device-grid">${devices.map(deviceCard).join("")}</div>` : `<div class="empty-state"><div class="empty-visual">${icon(favorites ? "star" : "monitor")}</div><h2>${search ? "没有找到匹配的设备" : favorites ? "还没有收藏设备" : "从你的第一台电脑开始"}</h2><p>${search ? "试试其他设备名称或内网地址。" : favorites ? "点击设备卡片右上角的星标，即可在这里快速找到它。" : "对方开启本机共享后，输入其设备码与访问密码即可连接。"}</p><div class="empty-actions">${button("设备码连接", "connect-code", "primary", "link")}${button("连接指南", "guide", "secondary", "help")}</div></div>`}${features()}`;
+    const hostState = state.host;
+    const access = hostState.access;
+    const running = hostState.phase === "running";
+    const busy =
+      hostTogglePending || ["starting", "stopping"].includes(hostState.phase);
+    const shareDisabledReason = busy
+      ? "正在处理共享状态，请稍候。"
+      : !running && !hostState.available
+        ? "共享引擎不可用，请检查应用是否完整。"
+        : !running && !access.passwordConfigured
+          ? "请先设置并保存访问密码。"
+          : "";
+    const recent = [...state.devices].reverse().slice(0, 5);
+    const status = hostTogglePending
+      ? running
+        ? "正在关闭"
+        : "正在开启"
+      : {
+          stopped: "未开启",
+          starting: "正在开启",
+          running: "正在协助",
+          stopping: "正在关闭",
+          error: "异常",
+        }[hostState.phase] || "未知";
+    const recentOptions = recent
+      .map((device) => {
+        const code = device.name.match(/\b\d{9}\b/)?.[0] || "";
+        return `<option value="${escape(device.id)}" ${disabled(!code)}>${escape(device.name)} · ${statusLabel(device)}</option>`;
+      })
+      .join("");
+    return `${sessionBanner()}
+      <section class="assist-panel local-assist">
+        <header class="assist-panel-heading">
+          <div><h2>本设备</h2><p>${escape(state.local.hostname)}</p></div>
+          <div class="share-state"><span class="status-pill ${running ? "online" : ""}" role="status" aria-live="polite"><span class="dot ${running ? "green" : ""}"></span>${status}</span><span class="share-button-wrap"${shareDisabledReason ? ' tabindex="0" aria-describedby="share-disabled-reason"' : ""}><button type="button" class="share-toggle" role="switch" aria-label="允许远程协助" aria-checked="${running}" aria-busy="${busy}" data-action="host-toggle" ${disabled(!!shareDisabledReason)}><span>允许远程协助</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>${shareDisabledReason ? `<span class="share-tooltip" id="share-disabled-reason" role="tooltip">${escape(shareDisabledReason)}</span>` : ""}</span></div>
+        </header>
+        <div class="local-assist-body">
+          <div class="local-credential"><div><span class="field-label">本设备 ID</span><strong class="device-code">${escape(access.code)}</strong></div><button class="button secondary copy-code" data-action="copy-device-code">${icon("copy")}复制 ID</button></div>
+          <form id="host-password-form" class="inline-credential-form">
+            <div class="local-password-field"><label for="local-password">访问密码<span>${access.passwordConfigured ? (access.passwordMode === "temporary" ? "临时密码 · 重启刷新" : "固定密码") : "请设置一个访问密码"}</span></label><div class="password-input-wrap"><input id="local-password" name="password" type="${localPasswordVisible ? "text" : "password"}" required maxlength="128" autocomplete="new-password" placeholder="${access.passwordConfigured ? "••••••••" : "输入本设备的连接密码"}" value="${escape(localPassword)}" ${disabled(running || busy)} /><button class="password-visibility" type="button" data-action="show-host-password" aria-label="${localPasswordVisible ? "隐藏密码" : "显示密码"}" title="${localPasswordVisible ? "隐藏密码" : "显示密码"}" ${disabled(!access.passwordConfigured && !localPassword)}>${icon(localPasswordVisible ? "eye-off" : "eye")}</button></div></div>
+            <button class="button secondary" type="submit" ${disabled(running || busy)}>设置固定密码</button>
+          </form>
+          <p class="assist-inline-note">${running ? "其他设备现在可以使用本设备 ID 与访问密码连接。" : "开启前须设置访问密码；首次开启可能需要系统管理员授权。仅允许本地子网连接。"}</p>
+        </div>
+      </section>
+      <section class="assist-panel partner-assist">
+        <header class="assist-panel-heading"><div><h2>远控伙伴设备</h2><p>输入对方的设备 ID 和访问密码，建立加密的内网连接。</p></div><select id="recent-connections" aria-label="最近连接"><option value="">最近连接${recent.length ? "" : "（暂无记录）"}</option>${recentOptions}</select></header>
+        <form id="connect-form" class="partner-connect-form">
+          <label>伙伴设备 ID<input id="partner-code" name="code" required pattern="[0-9]{9}" maxlength="9" inputmode="numeric" autocomplete="off" placeholder="输入 9 位设备 ID" value="${escape(partnerCode)}" /></label>
+          <label>设备访问密码<input id="partner-password" name="password" type="password" required maxlength="128" autocomplete="off" placeholder="输入对方设置的访问密码" value="${escape(partnerPassword)}" /></label>
+          <button class="button primary" type="submit" ${disabled(connecting || !state.engines.nativeAvailable || !!state.session)}>${connecting ? "正在连接…" : "连接"}</button>
+          <p id="connect-error" class="form-error" role="alert"></p>
+        </form>
+      </section>`;
   }
 
   function detail() {
@@ -149,7 +225,7 @@
         : state.session
           ? "请先结束当前原生串流"
           : "在独立 SDL 窗口打开远程桌面";
-    return `${sessionBanner()}<div class="page-heading"><div><div class="device-title-row"><span class="device-status-large ${online ? "online" : ""}"><span class="dot ${online ? "green" : ""}"></span>${statusLabel(device)}</span><h1>${escape(device.name)}</h1></div><p>${escape(device.address)}${online ? ` · 探测 ${device.status.latency} ms` : ""}</p></div><div class="heading-buttons"><button class="icon-button" data-action="favorite" aria-label="收藏设备">${icon("star")}</button><button class="icon-button" data-action="remove" aria-label="移除设备">${icon("trash")}</button></div></div>
+    return `${sessionBanner()}    <div class="page-heading"><div><div class="device-title-row"><span class="device-status-large ${online ? "online" : ""}"><span class="dot ${online ? "green" : ""}"></span>${statusLabel(device)}</span><h1>${escape(device.name)}</h1></div><p>${online ? `探测 ${device.status.latency} ms` : "最近连接设备"}</p></div><div class="heading-buttons"><button class="icon-button" data-action="favorite" aria-label="收藏设备">${icon("star")}</button><button class="icon-button" data-action="remove" aria-label="移除设备">${icon("trash")}</button></div></div>
       <div class="desktop-card"><button class="desktop-hero" data-action="stream" ${disabled(blocked)} title="${reason}" aria-label="进入桌面"><span class="hero-tag">${icon("shield")} LAN CONNECTION</span><span class="hero-cta">进入桌面 ${icon("arrow")}</span><span class="hero-caption">设备码 + 密码 · 内网直连</span><span class="hero-bottom">连接入口 · 非实时桌面预览</span></button><div class="desktop-actions">${button("设备码连接", "connect-code", "secondary", "link")}${button("串流设置", "settings", "secondary", "settings")}</div></div>
       <div class="device-notice ${online ? "" : "warning"}">${icon("shield")}<span>${online ? "输入对方设备码与访问密码即可连接，无需手工配对。Ctrl + Alt + F12 退出串流。" : escape(device.status?.error || "设备尚未在线，请开启对方的本机共享。")}</span></div>
       <div class="section-label"><h2>快速启动</h2><span>使用同一设备码与密码授权</span></div><div class="shortcut-grid">${device.shortcuts.map((shortcut) => `<div class="shortcut-card"><button class="shortcut-launch" data-action="launch-shortcut" data-shortcut="${escape(shortcut.id)}" ${disabled(blocked)}><span>${escape(shortcut.name)}</span></button><button class="small-icon-button" data-action="remove-shortcut" data-shortcut="${escape(shortcut.id)}" aria-label="删除快捷启动 ${escape(shortcut.name)}">${icon("close")}</button></div>`).join("")}<button class="add-shortcut" data-action="add-shortcut">${icon("plus")}添加快捷启动</button></div>`;
@@ -167,12 +243,6 @@
     return `
       <div class="page-heading"><div><h1>连接，按你的习惯</h1><p>设置会应用于下一次原生串流，不会打断正在运行的窗口。</p></div></div>
       <form id="settings-form">
-        <div class="settings-section">
-          <h2>soluna-stream · 无 Qt <span class="engine-status ${state.engines.nativeAvailable ? "ok" : ""}">${state.engines.nativeAvailable ? "已找到客户端" : "尚未配置"}</span></h2>
-          <p>Electron 管理配对与应用；moonlight-common-c 接收串流，FFmpeg 解码，SDL 提供独立窗口、音频与键鼠。</p>
-          <label>客户端可执行文件<div class="input-action"><input name="nativePath" id="native-path" value="${escape(s.nativePath)}" placeholder="${escape(state.engines.nativePath || "选择编译后的 soluna-stream.exe")}" spellcheck="false"/><button class="button secondary" type="button" data-action="pick-native">浏览文件</button></div></label>
-          <span class="field-help">留空使用随包引擎。开发环境先运行 npm run build:native。</span>
-        </div>
         <div class="settings-section">
           <h2>画面与性能</h2><p>第一版使用内网优化的桌面绝对鼠标模式，不会自动修改远端显示器分辨率。</p>
           <div class="form-grid">
@@ -193,6 +263,10 @@
     const h = state.host;
     const running = h.phase === "running";
     const busy = ["starting", "stopping"].includes(h.phase);
+    const macOS = state.platform === "macos";
+    const macOSPermissions = macOS
+      ? `<div class="guide-step"><span class="step-number">03</span><div><h3>macOS 系统权限</h3><p>开启共享时会提前请求屏幕录制权限，不必等到对方连接。若系统未弹出提示，请在“隐私与安全性”中为 SolunaRemote 开启屏幕录制；Sunshine 需要辅助功能权限（部分版本称“设备控制和数据访问”）。若 macOS 防火墙已开启，需在防火墙选项中允许 Sunshine.app 与 SolunaRemote.app 接受传入连接；防火墙关闭时不要求授权，应用不会自动更改系统设置。</p><div class="button-row">${button("打开系统设置", "host-settings", "secondary", "settings")}${button("在 Finder 中显示 Sunshine.app", "host-reveal", "secondary")}${button("在 Finder 中显示 SolunaRemote", "host-reveal-soluna", "secondary")}</div></div></div>`
+      : "";
     const labels = {
       stopped: "未共享",
       starting: "正在启动",
@@ -201,97 +275,147 @@
       error: "共享异常",
     };
     return `<div class="page-heading"><div><h1>本机共享</h1><p>同一个程序，既能控制其他电脑，也能让其他电脑连接本机。无需另外安装 Sunshine 或 Moonlight。</p></div></div>
-      <div class="host-panel"><span class="host-icon">${icon("sun")}</span><div><h2>${escape(state.local.hostname)} · ${labels[h.phase] || "未知状态"}</h2><p>${escape(state.local.addresses.join(" · ") || "暂无可用的 IPv4 地址")}<br/>${h.available ? "内置 Sunshine 服务端 · 应用管理生命周期" : "缺少内置共享引擎，请重新准备完整发行包"}</p></div>${button(running ? "停止本机共享" : "开启本机共享", running ? "host-stop" : "host-start", running ? "secondary" : "primary", "sun", disabled(busy || !h.available))}</div>
+      <div class="host-panel"><span class="host-icon">${icon("sun")}</span><div><h2>${escape(state.local.hostname)} · ${labels[h.phase] || "未知状态"}</h2><p>${h.available ? "内置 Sunshine 服务端 · 应用管理生命周期" : "缺少内置共享引擎，请重新准备完整发行包"}</p></div>${button(running ? "停止本机共享" : "开启本机共享", running ? "host-stop" : "host-start", running ? "secondary" : "primary", "sun", disabled(busy || !h.available))}</div>
       ${h.error || h.access.error ? `<div class="device-notice warning">${icon("help")}<span>${escape(h.error || h.access.error)}</span></div>` : ""}
       <div class="host-panel"><div><h2>本机设备码：<span id="host-device-code">${escape(h.access.code)}</span></h2><p>${h.access.passwordConfigured ? "访问密码已设置，不在界面回显。" : "先设置访问密码，再开启共享。"}</p></div></div>
-      <div id="host-controls"><div class="guide-step"><span class="step-number">01</span><div><h3>允许指定内网设备连接</h3><p>填写控制端电脑的私有 IPv4，不是本机地址。此按钮会请求管理员权限，仅为内置引擎放行该设备的串流端口，不开放管理页面。</p><label>控制端 IPv4<input id="host-client-address" placeholder="例如 192.168.1.20" value="${escape(h.allowedAddress || "")}" /></label>${button("授权此设备访问（管理员）", "host-allow", "secondary", "shield")}</div></div>
-      <div class="guide-step"><span class="step-number">02</span><div><h3>设置访问密码</h3><p>另一台电脑输入设备码与此密码即可连接，不需要配对码。设备码对应所选内网 IP；切换网卡或 IP 变化后需重新设置。修改密码前须停止共享；下次开启共享会撤销以前的客户端授权。</p><form id="host-password-form"><label>共享网卡<select name="address" ${disabled(running || busy)}>${(h.access.addresses ?? state.local.addresses).map((address) => `<option value="${escape(address)}" ${address === h.access.address ? "selected" : ""}>${escape(address)}</option>`).join("")}</select></label><label>本机访问密码<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" ${disabled(running || busy)} /></label><button class="button secondary" type="submit" ${disabled(running || busy)}>保存访问密码</button></form></div></div></div>
+      <div id="host-controls"><div class="guide-step"><span class="step-number">01</span><div><h3>开启共享</h3><p>${macOS ? "若系统防火墙已开启，请允许 Sunshine.app 与 SolunaRemote.app 入站连接；应用不会代替你修改系统设置。" : "首次开启可能需要系统管理员授权，以便为本地子网配置必要的防火墙规则。"}</p></div></div>
+      <div class="guide-step"><span class="step-number">02</span><div><h3>设置访问密码</h3><p>另一台电脑输入本机设备 ID 与此密码即可连接。密码无需复杂度组合，非空即可（最多 128 个字符）。应用会自动使用系统默认网络；默认网络变化后，重新保存访问密码即可。修改密码前须停止共享；下次开启共享会撤销以前的客户端授权。</p><form id="host-password-form"><label>本机访问密码<input name="password" type="password" required maxlength="128" autocomplete="new-password" ${disabled(running || busy)} /></label><button class="button secondary" type="submit" ${disabled(running || busy)}>保存访问密码</button></form></div></div>${macOSPermissions}</div>
       <p class="scope-note">共享默认关闭，不注册系统服务、不安装驱动。关闭应用会停止本机共享；配对与配置保存在当前用户的数据目录中。UPnP 已禁用，管理接口仅允许本机访问。仅在有权控制的设备上使用。</p>`;
   }
 
   function guide() {
-    return `<div class="page-heading"><div><h1>连接指南</h1><p>两台电脑，同一个 SolunaRemote 程序。</p></div></div><div class="guide-step"><span class="step-number">01</span><div><h3>被控电脑</h3><p>打开本机共享，选择可互通的共享网卡，设置至少 12 个字符的访问密码，授权控制端内网地址并开启共享。将本机设备码与密码提供给有权访问的人。</p></div></div><div class="guide-step"><span class="step-number">02</span><div><h3>控制电脑</h3><p>点击设备码连接，输入对方的 12 位设备码与访问密码。程序直接解析内网地址、使用 TLS-PSK 验证密码并自动完成底层授权；不展示或要求输入配对码，也不依赖组播发现。</p></div></div><div class="guide-step"><span class="step-number">03</span><div><h3>退出与排障</h3><p>Ctrl + Alt + F12 或会话控制中心可断开连接。停止共享或关闭应用会停止被控访问。设备码随所选网卡 IP 改变；跨子网需要内网路由和防火墙允许。没有云注册、公网中转或独立软件安装。</p></div></div>`;
+    return `<div class="page-heading"><div><h1>连接指南</h1><p>两台电脑，同一个 SolunaRemote 程序。</p></div></div><div class="guide-step"><span class="step-number">01</span><div><h3>被控电脑</h3><p>设置访问密码并开启共享，首次开启时按提示批准系统管理员授权。将本机设备 ID 与密码提供给有权访问的人。</p></div></div><div class="guide-step"><span class="step-number">02</span><div><h3>控制电脑</h3><p>点击连接，输入对方的 9 位设备 ID 与访问密码。程序自动选择系统默认网络，并在后台完成设备验证；无需配对码或组播发现。</p></div></div><div class="guide-step"><span class="step-number">03</span><div><h3>退出与排障</h3><p>Ctrl + Alt + F12 或会话控制中心可断开连接。停止共享或关闭应用会停止被控访问。默认仅允许本地子网连接；跨子网需要另行配置网络路由和防火墙。没有云注册、公网中转或独立软件安装。</p></div></div>`;
   }
 
   function renderContent() {
     if (!state) return;
     const labels = {
-      devices: "全部设备",
-      favorites: "收藏设备",
+      assist: "远程协助",
       detail: selected()?.name || "设备详情",
       settings: "设置",
       host: "本机共享",
       guide: "连接指南",
     };
     document.querySelector("#breadcrumb").innerHTML =
-      `工作空间 <span>/</span> ${escape(labels[route])}`;
+      route === "assist"
+        ? "远程协助"
+        : `远程协助 <span>/</span> ${escape(labels[route] || "远程桌面")}`;
     content.innerHTML =
-      route === "detail"
-        ? detail()
-        : route === "settings"
-          ? settings()
-          : route === "host"
-            ? host()
-            : route === "guide"
-              ? guide()
-              : overview();
+      route === "assist"
+        ? overview()
+        : route === "detail"
+          ? detail()
+          : route === "settings"
+            ? settings()
+            : route === "host"
+              ? host()
+              : route === "guide"
+                ? guide()
+                : overview();
   }
 
-  function openDevice(input = {}) {
-    const form = document.querySelector("#device-form");
-    form.reset();
-    form.elements.name.value = input.name || "";
-    form.elements.address.value = input.address || "";
-    document.querySelector("#device-error").textContent = "";
-    document.querySelector("#device-dialog").showModal();
-  }
-
-  async function scan() {
-    if (scanning) return;
-    scanning = true;
-    const results = document.querySelector("#discovery-results");
-    results.innerHTML = `<div class="discovery-empty">正在搜索局域网中的 Sunshine 主机…</div>`;
+  async function startHost() {
+    if (hostTogglePending) return;
+    const dialog = document.querySelector("#firewall-dialog");
+    const retrying = dialog.open;
+    const recheck = document.querySelector("#firewall-recheck");
+    const errorField = document.querySelector("#firewall-error");
+    hostTogglePending = true;
+    recheck.disabled = true;
+    errorField.textContent = "";
+    renderContent();
     try {
-      discovery = await window.lan.call("discover");
-      results.innerHTML = discovery.length
-        ? discovery
-            .map(
-              (device, index) =>
-                `<div class="discovery-row"><div><strong>${escape(device.name)}</strong><span>${escape(device.address)}</span></div>${button(state.devices.some((item) => item.address === device.address) ? "已添加" : "添加", "discovered-add", "secondary", "", `data-index="${index}" ${disabled(state.devices.some((item) => item.address === device.address))}`)}</div>`,
-            )
-            .join("")
-        : `<div class="discovery-empty">暂未发现 Sunshine 主机。<br/>请检查主机已启动、设备处于同一子网，或使用手动添加。</div>`;
+      if (
+        ["macos", "windows"].includes(state.platform) &&
+        !state.host.firewallManagedByPackage
+      ) {
+        const allowed = await window.lan.call("hostFirewallStatus");
+        if (retrying && !dialog.open) return;
+        if (typeof allowed !== "boolean")
+          throw new Error("无法读取防火墙状态，请稍后重新检查。");
+        if (!allowed) {
+          if (state.platform === "windows") {
+            document.querySelector("#firewall-description").textContent =
+              "首次共享需要管理员授权，为 SolunaRemote 和内置共享引擎添加内网入站规则。只允许所需端口和本地子网，不会关闭防火墙或开放 Web 管理端口。";
+            document.querySelector("#firewall-help").textContent =
+              "点击“授权并开启共享”，然后在 Windows 管理员权限提示中选择“是”。取消授权将不会开启共享；规则生效后无需重复授权。组织策略或其他阻止规则仍可能限制连接。";
+            document.querySelector("#firewall-locate").hidden = true;
+            document.querySelector("#firewall-settings").hidden = true;
+            recheck.textContent = "授权并开启共享";
+            if (!retrying) {
+              dialog.showModal();
+              return;
+            }
+          } else {
+            errorField.textContent =
+              "尚未检测到两个应用的入站授权。请在防火墙选项中允许传入连接后重新检查。";
+            if (!dialog.open) dialog.showModal();
+            return;
+          }
+        }
+      }
+      await window.lan.call("hostStart");
+      if (dialog.open) dialog.close();
+      notify(
+        state.host.firewallManagedByPackage
+          ? "本机共享已开启。商店版请在专用或域网络中连接；组织防火墙策略仍可能阻止访问。"
+          : "本机共享已开启，可使用设备码与密码连接。",
+      );
     } catch (error) {
-      results.textContent = error.message;
+      if (dialog.open) errorField.textContent = error.message;
+      else throw error;
     } finally {
-      scanning = false;
+      hostTogglePending = false;
+      recheck.disabled = false;
+      renderContent();
     }
   }
 
-  function connect(shortcut = null) {
-    connectShortcut = shortcut;
-    const form = document.querySelector("#connect-form");
-    form.reset();
-    form.elements.code.value = selected()?.name.match(/\b\d{12}\b/)?.[0] || "";
-    document.querySelector("#connect-error").textContent = "";
-    document.querySelector("#connect-dialog").showModal();
+  function requestHostStart() {
+    if (hostTogglePending) return;
+    if (state.platform !== "macos") return startHost();
+    const dialog = document.querySelector("#host-permission-dialog");
+    if (!dialog.open) {
+      document.querySelector("#host-permission-error").textContent = "";
+      dialog.showModal();
+    }
   }
 
   const actions = {
-    add: () => openDevice(),
-    discover: async () => {
-      document.querySelector("#discover-dialog").showModal();
-      await scan();
+    "toggle-theme": () => {
+      const nextTheme =
+        document.documentElement.dataset.iconTheme === "dark"
+          ? "light"
+          : "dark";
+      localStorage.setItem(themeStorageKey, nextTheme);
+      setIconTheme(nextTheme);
     },
-    rescan: scan,
-    "discovered-add": (element) => {
-      document.querySelector("#discover-dialog").close();
-      openDevice(discovery[Number(element.dataset.index)]);
-    },
-    "all-devices": () => navigate("devices"),
     guide: () => navigate("guide"),
     settings: () => navigate("settings"),
     favorite: (element) => window.lan.call("favorite", currentDevice(element)),
+    "connect-code": () => {
+      navigate("assist");
+      document.querySelector("#partner-code")?.focus();
+    },
+    "copy-device-code": async () => {
+      const code = state.host.access.code;
+      if (navigator.clipboard?.writeText)
+        await navigator.clipboard.writeText(code);
+      else {
+        const field = document.createElement("textarea");
+        field.value = code;
+        field.style.position = "fixed";
+        field.style.opacity = "0";
+        document.body.append(field);
+        field.select();
+        if (!document.execCommand("copy")) {
+          field.remove();
+          throw new Error("无法复制设备 ID。");
+        }
+        field.remove();
+      }
+      notify("本设备 ID 已复制。");
+    },
     refresh: async () => {
       if (refreshing) return;
       refreshing = true;
@@ -306,27 +430,57 @@
         document.querySelector("#refresh-button").disabled = false;
       }
     },
-    stream: () => connect(),
-    "connect-code": () => connect(),
+    "retry-state": async () => {
+      try {
+        const next = await window.lan.call("state");
+        if (!applyState(next))
+          throw new Error("应用未返回有效状态，请稍后重试。");
+        await actions.refresh();
+      } catch (error) {
+        if (!state) showStateLoadError(error);
+        else notify(error.message);
+      }
+    },
+    stream: () => actions["connect-code"](),
     admin: () => window.lan.call("openSunshine", selectedId),
     "local-admin": () => window.lan.call("openSunshine"),
-    "host-start": async () => {
-      await window.lan.call("hostStart");
-      notify("本机共享已开启，可使用设备码与密码连接。");
-    },
+    "host-start": requestHostStart,
+    "firewall-recheck": startHost,
+    "firewall-settings": () => window.lan.call("openFirewallSettings"),
     "host-stop": () => window.lan.call("hostStop"),
-    "host-allow": async () => {
-      await window.lan.call(
-        "hostAllowClient",
-        document.querySelector("#host-client-address").value.trim(),
-      );
-      notify("已为指定内网设备授权串流端口。");
+    "host-settings": () => window.lan.call("openHostSettings"),
+    "host-accessibility-settings": () =>
+      window.lan.call("openHostAccessibilitySettings"),
+    "host-permission-continue": () => {
+      document.querySelector("#host-permission-dialog").close();
+      return startHost();
+    },
+    "host-reveal": () => window.lan.call("revealHostApp"),
+    "host-reveal-soluna": () => window.lan.call("revealSolunaApp"),
+    "show-host-password": async () => {
+      if (!localPasswordVisible && !localPassword) {
+        localPassword = await window.lan.call("hostRevealPassword");
+      }
+      localPasswordVisible = !localPasswordVisible;
+      renderContent();
+    },
+    "host-toggle": async () => {
+      if (hostTogglePending) return;
+      const running = state.host.phase === "running";
+      if (!running) return requestHostStart();
+      hostTogglePending = true;
+      renderContent();
+      try {
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => setTimeout(resolve, 0)),
+        );
+        await window.lan.call("hostStop");
+      } finally {
+        hostTogglePending = false;
+        renderContent();
+      }
     },
     "download-sunshine": () => window.lan.call("openLink", "sunshine"),
-    "pick-native": async () => {
-      const executable = await window.lan.call("pickNative");
-      if (executable) document.querySelector("#native-path").value = executable;
-    },
     stop: () => window.lan.call("cancel", state.session.id),
     remove: () => {
       removeId = selectedId;
@@ -344,7 +498,11 @@
         deviceId: selectedId,
         shortcutId: element.dataset.shortcut,
       }),
-    "launch-shortcut": (element) => connect(element.dataset.shortcut),
+    "launch-shortcut": () => {
+      partnerCode = selected()?.name.match(/\b\d{9}\b/)?.[0] || "";
+      renderContent();
+      document.querySelector("#partner-password")?.focus();
+    },
   };
 
   document.addEventListener("click", async (event) => {
@@ -364,64 +522,63 @@
       )
         await actions[element.dataset.action](element);
     } catch (error) {
-      notify(error.message);
+      if (document.querySelector("#firewall-dialog").open)
+        document.querySelector("#firewall-error").textContent = error.message;
+      else if (document.querySelector("#host-permission-dialog").open)
+        document.querySelector("#host-permission-error").textContent =
+          error.message;
+      else notify(error.message);
     }
   });
 
   document.addEventListener("input", (event) => {
-    if (event.target.id !== "device-search") return;
-    search = event.target.value;
-    const position = event.target.selectionStart;
-    renderContent();
-    const input = document.querySelector("#device-search");
-    input.focus();
-    input.setSelectionRange(position, position);
+    if (event.target.id === "partner-code") {
+      partnerPasswordRequest++;
+      partnerCode = event.target.value.replace(/\D/g, "").slice(0, 9);
+      partnerPassword = "";
+      const passwordInput = document.querySelector("#partner-password");
+      if (passwordInput) passwordInput.value = "";
+    } else if (event.target.id === "partner-password") {
+      partnerPasswordRequest++;
+      partnerPassword = event.target.value;
+    } else if (event.target.id === "local-password") {
+      localPassword = event.target.value;
+      const visibility = document.querySelector(
+        '[data-action="show-host-password"]',
+      );
+      if (visibility)
+        visibility.disabled =
+          !state.host.access.passwordConfigured && !localPassword;
+    }
   });
 
-  document
-    .querySelector("#device-form")
-    .addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.target;
-      const submit = form.querySelector('[type="submit"]');
-      submit.disabled = true;
-      try {
-        const id = await window.lan.call("add", {
-          name: form.elements.name.value,
-          address: form.elements.address.value,
-          app: form.elements.app.value,
-        });
-        document.querySelector("#device-dialog").close();
-        navigate("detail", id);
-        notify("设备已添加，连接信息保存在本机。");
-      } catch (error) {
-        document.querySelector("#device-error").textContent = error.message;
-      } finally {
-        submit.disabled = false;
-      }
-    });
-
-  document
-    .querySelector("#shortcut-form")
-    .addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.target;
-      const submit = form.querySelector('[type="submit"]');
-      submit.disabled = true;
-      try {
-        await window.lan.call("shortcut", {
-          deviceId: selectedId,
-          name: form.elements.name.value,
-          app: form.elements.app.value,
-        });
-        document.querySelector("#shortcut-dialog").close();
-        notify("快捷启动已添加。");
-      } catch (error) {
-        document.querySelector("#shortcut-error").textContent = error.message;
-      } finally {
-        submit.disabled = false;
-      }
-    });
+  document.addEventListener("change", async (event) => {
+    if (event.target.id !== "recent-connections") return;
+    const request = ++partnerPasswordRequest;
+    if (!event.target.value) return;
+    const device = state.devices.find(
+      (entry) => entry.id === event.target.value,
+    );
+    const code = device?.name.match(/\b\d{9}\b/)?.[0];
+    if (!device || !code) return;
+    selectedId = device.id;
+    partnerCode = code;
+    partnerPassword = "";
+    renderContent();
+    document.querySelector("#partner-password")?.focus();
+    try {
+      const password = await window.lan.call("recentPassword", {
+        deviceId: device.id,
+        code,
+      });
+      if (request !== partnerPasswordRequest || route !== "assist") return;
+      partnerPassword = password || "";
+      const input = document.querySelector("#partner-password");
+      if (input) input.value = partnerPassword;
+    } catch (error) {
+      if (request === partnerPasswordRequest) notify(error.message);
+    }
+  });
 
   document.addEventListener("submit", async (event) => {
     if (event.target.id === "host-password-form") {
@@ -432,11 +589,12 @@
       try {
         await window.lan.call("hostPassword", {
           password: form.elements.password.value,
-          address: form.elements.address.value,
         });
-        form.reset();
+        localPassword = "";
+        localPasswordVisible = false;
+        renderSidebar();
         renderContent();
-        notify("访问密码已保存。");
+        notify("本设备访问密码已保存。");
       } catch (error) {
         notify(error.message);
       } finally {
@@ -445,29 +603,33 @@
       return;
     }
     if (event.target.id === "connect-form") {
+      partnerPasswordRequest++;
       event.preventDefault();
       document.querySelector("#connect-error").textContent = "";
       const form = event.target;
-      const submit = form.querySelector('[type="submit"]');
-      submit.disabled = true;
       connecting = true;
+      renderContent();
       try {
         const session = await window.lan.call("connectPassword", {
           code: form.elements.code.value,
           password: form.elements.password.value,
-          shortcutId: connectShortcut,
+          shortcutId: null,
           deviceId: selectedId,
         });
-        form.elements.password.value = "";
+        partnerPassword = "";
+        partnerCode = "";
         connecting = false;
-        document.querySelector("#connect-dialog").close();
-        navigate("detail", session.deviceId);
+        selectedId = session.deviceId;
+        renderSidebar();
+        renderContent();
         notify("密码验证通过，正在等待远程桌面首帧。");
       } catch (error) {
-        document.querySelector("#connect-error").textContent = error.message;
+        const message = error.message;
+        connecting = false;
+        renderContent();
+        document.querySelector("#connect-error").textContent = message;
       } finally {
         connecting = false;
-        submit.disabled = false;
       }
       return;
     }
@@ -480,7 +642,6 @@
       const fields = form.elements;
       await window.lan.call("saveSettings", {
         moonlightPath: state.settings.moonlightPath,
-        nativePath: fields.nativePath.value.trim(),
         resolution: fields.resolution.value,
         fps: Number(fields.fps.value),
         bitrate: Number(fields.bitrate.value) * 1000,
@@ -498,13 +659,32 @@
 
   document
     .querySelector("#confirm-remove")
-    .addEventListener("click", async () => {
+    ?.addEventListener("click", async () => {
       try {
         await window.lan.call("remove", removeId);
         document.querySelector("#confirm-dialog").close();
-        navigate("devices");
+        navigate("assist");
         notify("已移除本地设备记录。");
       } catch (error) {
+        notify(error.message);
+      }
+    });
+  window.addEventListener("lan:close-confirmation-requested", () => {
+    const dialog = document.querySelector("#close-confirm-dialog");
+    if (!dialog.open) dialog.showModal();
+  });
+  document
+    .querySelector("#cancel-close")
+    .addEventListener("click", () =>
+      document.querySelector("#close-confirm-dialog").close(),
+    );
+  document
+    .querySelector("#confirm-close")
+    .addEventListener("click", async () => {
+      try {
+        await window.lan.call("window", "confirm-close");
+      } catch (error) {
+        document.querySelector("#close-confirm-dialog").close();
         notify(error.message);
       }
     });
@@ -514,11 +694,6 @@
     content.innerHTML = `<div class="empty-state"><h2>请使用 SolunaRemote 桌面应用</h2><p>在项目目录运行 npm start。浏览器中不开放设备探测、文件访问或进程启动权限。</p></div>`;
     return;
   }
-  document.querySelector("#connect-dialog").addEventListener("close", () => {
-    document.querySelector("#connect-form").elements.password.value = "";
-    if (connecting)
-      window.lan.call("cancelConnect").catch((error) => notify(error.message));
-  });
   window.lan.onState(applyState);
   window.lan.onEngine((event) => {
     if (event.started || event.progress) {
@@ -526,9 +701,17 @@
       return;
     }
     if (event.firstFrame) {
+      window.lan
+        .call("state")
+        .then(applyState)
+        .catch((error) => notify(error.message));
       notify("远程桌面已收到并渲染首帧。");
       return;
     }
+    window.lan
+      .call("state")
+      .then(applyState)
+      .catch((error) => notify(error.message));
     notify(
       event.error ||
         (event.cancelled
@@ -536,13 +719,25 @@
           : "原生串流窗口已关闭。"),
     );
   });
-  window.lan
-    .call("state")
+  content.innerHTML = `<div class="empty-state" role="status">正在加载应用状态…</div>`;
+  let stateLoadTimeout;
+  const stateLoadTimedOut = new Promise((_, reject) => {
+    stateLoadTimeout = window.setTimeout(
+      () => reject(new Error("读取应用状态超时，请重试。")),
+      10000,
+    );
+  });
+  Promise.race([window.lan.call("state"), stateLoadTimedOut])
     .then((data) => {
-      applyState(data);
+      if (!applyState(data))
+        throw new Error("应用未返回有效状态，请退出后重新打开。");
       return actions.refresh();
     })
-    .catch((error) => notify(error.message));
+    .catch((error) => {
+      if (!state) showStateLoadError(error);
+      else notify(error.message);
+    })
+    .finally(() => window.clearTimeout(stateLoadTimeout));
   window.setInterval(() => {
     if (!document.hidden && state && !refreshing)
       actions.refresh().catch((error) => notify(error.message));

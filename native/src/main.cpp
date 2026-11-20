@@ -625,11 +625,25 @@ struct Player {
                   {"panel", chrome.panel},
                   {"performance", chrome.performance},
                   {"muted", chrome.muted},
+                  {"display", chrome.selectedDisplay},
                   {"fullscreen", (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0}});
         if (action != SessionChrome::Pass) {
             releaseInput();
             if (action == SessionChrome::Disconnect)
                 quit = true;
+            if (action == SessionChrome::DisplayChanged) {
+                if (!selfTest && connected) {
+                    const short key = static_cast<short>(0x8000 | (0x70 + chrome.selectedDisplay - 1));
+                    const char modifiers = MODIFIER_CTRL | MODIFIER_ALT | MODIFIER_SHIFT;
+                    if (LiSendKeyboardEvent(key, KEY_ACTION_DOWN, modifiers) != 0 ||
+                        LiSendKeyboardEvent(key, KEY_ACTION_UP, modifiers) != 0)
+                        fail("Cannot queue remote display switch");
+                    else
+                        emit({{"event", "display-switch-requested"},
+                              {"display", chrome.selectedDisplay},
+                              {"hotkey", "Ctrl+Alt+Shift+F" + std::to_string(chrome.selectedDisplay)}});
+                }
+            }
             if (action == SessionChrome::AudioChanged) {
                 audioMuted = chrome.muted;
                 if (audio)
@@ -782,6 +796,8 @@ struct Player {
         SDL_SetWindowMinimumSize(window, 860, 480);
         chrome.name = config.value("deviceName", std::string("SolunaRemote"));
         require(!chrome.name.empty() && chrome.name.size() <= 256, "Invalid remote device name");
+        chrome.displayCount = config.value("displayCount", 1);
+        require(chrome.displayCount >= 1 && chrome.displayCount <= 32, "Invalid remote display count");
         chrome.initialize(window);
         if (displayMode != "windowed")
             require(SDL_SetWindowFullscreen(window, displayMode == "fullscreen"
@@ -991,7 +1007,11 @@ struct Player {
               {"audioPackets", audioPackets.load()},
               {"selfTest", selfTest},
               {"controls",
-               {{"performance", chrome.performance}, {"panel", chrome.panel}, {"muted", chrome.muted}}}});
+               {{"performance", chrome.performance},
+                {"panel", chrome.panel},
+                {"muted", chrome.muted},
+                {"display", chrome.selectedDisplay},
+                {"displayCount", chrome.displayCount}}}});
         return error == 0 ? 0 : 1;
     }
     ~Player() {

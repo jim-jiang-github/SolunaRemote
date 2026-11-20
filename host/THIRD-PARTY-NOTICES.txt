@@ -5,6 +5,9 @@ Sunshine v2026.914.233613
 https://github.com/SunshineStream/Sunshine/tree/v2026.914.233613
 Release archive SHA256:
 233008e46f4c0e501a586cbfd6c4fd4a4c0d414a0b5fc7f13c070eb92ec3824b
+The macOS preparation script retrieves the corresponding official signed
+Sunshine application. Its architecture-specific archive hashes are recorded
+in scripts/prepare-host-macos.cjs.
 
 Sunshine is GPL-3.0 software. Preserve its license and provide complete
 corresponding source, dependency sources and build scripts as required when

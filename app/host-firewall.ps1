@@ -1,19 +1,20 @@
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [Parameter(Mandatory = $true)][string]$AppExecutable,
-    [Parameter(Mandatory = $true)][string]$Address
+    [Parameter(Mandatory = $true)][string]$AppExecutable
 )
 $ErrorActionPreference = 'Stop'
-try {
-    $parsed = [Net.IPAddress]::Parse($Address)
-    $bytes = $parsed.GetAddressBytes()
-    if ($parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
-        $parsed.ToString() -ne $Address -or
-        -not ($bytes[0] -eq 10 -or
-            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
-            ($bytes[0] -eq 192 -and $bytes[1] -eq 168))) {
-        throw 'Only an individual private IPv4 client address is accepted.'
+function Normalize-ExecutablePath([string]$Path) {
+    if ($Path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        return '\\' + $Path.Substring(8)
     }
+    if ($Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(4)
+    }
+    return $Path
+}
+try {
+    $Executable = Normalize-ExecutablePath $Executable
+    $AppExecutable = Normalize-ExecutablePath $AppExecutable
     if (-not [IO.Path]::IsPathRooted($Executable) -or
         -not (Test-Path -LiteralPath $Executable -PathType Leaf) -or
         [IO.Path]::GetFileName($Executable) -ne 'sunshine.exe') {
@@ -23,30 +24,41 @@ try {
         -not (Test-Path -LiteralPath $AppExecutable -PathType Leaf)) {
         throw 'Invalid SolunaRemote executable.'
     }
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($AppExecutable).ToLowerInvariant()))
+        $suffix = ([BitConverter]::ToString($digest) -replace '-', '').Substring(0, 16)
+    } finally { $hasher.Dispose() }
     $rules = @(
-        @{ Name = 'SolunaRemote-Integrated-TCP'; Protocol = 'TCP'; Ports = @(47984, 47989, 48010); Program = $Executable },
-        @{ Name = 'SolunaRemote-Integrated-UDP'; Protocol = 'UDP'; Ports = @('47998-48000', '48002'); Program = $Executable },
-        @{ Name = 'SolunaRemote-Access-TCP'; Protocol = 'TCP'; Ports = @(47991); Program = $AppExecutable },
-        @{ Name = 'SolunaRemote-Access-UDP'; Protocol = 'UDP'; Ports = @(5353); Program = $AppExecutable }
+        @{ Name = "SolunaRemote-Integrated-TCP-$suffix"; Protocol = 'TCP'; Ports = @(47984, 47989, 48010); Program = $Executable },
+        @{ Name = "SolunaRemote-Integrated-UDP-$suffix"; Protocol = 'UDP'; Ports = @('47998-48000', '48002'); Program = $Executable },
+        @{ Name = "SolunaRemote-Access-TCP-$suffix"; Protocol = 'TCP'; Ports = @(47991); Program = $AppExecutable },
+        @{ Name = "SolunaRemote-Access-UDP-$suffix"; Protocol = 'UDP'; Ports = @(5353); Program = $AppExecutable }
     )
+    $allRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop)
     foreach ($rule in $rules) {
-        $existing = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
+        $existing = @($allRules | Where-Object { $_.Name -eq $rule.Name })
+        if ($existing.Count -gt 1) { throw 'Duplicate SolunaRemote firewall rules found.' }
         if ($existing) {
             $filter = $existing | Get-NetFirewallApplicationFilter
-            if ($filter.Program -ne $rule.Program) {
-                throw 'An existing SolunaRemote rule belongs to another installation. No rule was changed.'
+            $ports = $existing | Get-NetFirewallPortFilter
+            if ((Normalize-ExecutablePath $filter.Program) -ne $rule.Program -or $existing.Direction -ne 'Inbound' -or
+                $existing.Action -ne 'Allow' -or $existing.Profile -ne 'Any' -or
+                $ports.Protocol -ne $rule.Protocol -or
+                (Compare-Object @($ports.LocalPort | ForEach-Object { "$_" } | Sort-Object) @($rule.Ports | ForEach-Object { "$_" } | Sort-Object))) {
+                throw 'An existing SolunaRemote rule does not match this installation. No rule was changed.'
             }
         }
     }
     foreach ($rule in $rules) {
-        $existing = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
+        $existing = @($allRules | Where-Object { $_.Name -eq $rule.Name })
         if ($existing) {
-            $existing | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress $Address | Out-Null
+            $existing | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet | Out-Null
             $existing | Enable-NetFirewallRule
         } else {
             New-NetFirewallRule -Name $rule.Name -DisplayName "SolunaRemote ($($rule.Name))" `
                 -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Ports `
-                -Program $rule.Program -RemoteAddress $Address -Profile Any | Out-Null
+                -Program $rule.Program -RemoteAddress LocalSubnet -Profile Any | Out-Null
         }
     }
     exit 0

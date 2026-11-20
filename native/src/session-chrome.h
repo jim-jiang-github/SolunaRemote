@@ -9,15 +9,19 @@
 #include <stdexcept>
 #include <string>
 #ifdef _WIN32
+#include <SDL_syswm.h>
+#include <commctrl.h>
 #include <windows.h>
 #endif
 
 class SessionChrome {
   public:
-    enum Action { Pass, Consumed, Disconnect, AudioChanged };
+    enum Action { Pass, Consumed, Disconnect, AudioChanged, DisplayChanged };
     bool muted = false;
     bool panel = false;
     bool performance = false;
+    int displayCount = 1;
+    int selectedDisplay = 1;
     int quality = 0;
     double measuredFps = 0, videoMbps = 0;
     uint32_t rtt = 0;
@@ -35,11 +39,33 @@ class SessionChrome {
 #endif
     }
 
+    int quickDisplayTabCount(int width) const {
+        if (width < 1100)
+            return 0;
+        return std::min(displayCount, std::max(0, (width - 710) / 84));
+    }
+
+    int panelRows() const {
+        return (displayCount + 2) / 3;
+    }
+
+    int panelHeight() const {
+        return 210 + panelRows() * 34;
+    }
+
     void initialize(SDL_Window *window) {
 #ifdef _WIN32
         SDL_SetWindowBordered(window, SDL_FALSE);
         if (SDL_SetWindowHitTest(window, hitTest, this) != 0)
             throw std::runtime_error(std::string("Cannot initialize session title bar: ") + SDL_GetError());
+        SDL_SysWMinfo info{};
+        SDL_VERSION(&info.version);
+        if (!SDL_GetWindowWMInfo(window, &info))
+            throw std::runtime_error(std::string("Cannot access session window handle: ") + SDL_GetError());
+        window_ = window;
+        if (!SetWindowSubclass(info.info.win.window, windowSubclassProc, 1,
+                               reinterpret_cast<DWORD_PTR>(this)))
+            throw std::runtime_error("Cannot initialize title-bar double-click handling");
 #else
         (void)window;
 #endif
@@ -66,27 +92,46 @@ class SessionChrome {
         } else {
             return panel && (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) ? Consumed : Pass;
         }
-        const bool overPanel = panel && x >= w - 286 && y >= height() && y < height() + 240;
+        const int quickTabs = quickDisplayTabCount(w);
+        const bool overPanel = panel && x >= w - 286 && y >= height() && y < height() + panelHeight();
         if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            const bool overQuickTabs =
+                quickTabs > 0 && x >= 430 && x < 430 + quickTabs * 84;
             if (y < height()) {
+                if (overQuickTabs) {
+                    const int display = (x - 430) / 84 + 1;
+                    if (display <= displayCount && display != selectedDisplay) {
+                        selectedDisplay = display;
+                        return DisplayChanged;
+                    }
+                    return Consumed;
+                }
                 if (x >= w - 46)
                     return Disconnect;
-                if (x >= w - 92) {
-                    if (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP)
-                        toggleFullscreen(window);
-                    else if (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED)
-                        SDL_RestoreWindow(window);
-                    else
-                        SDL_MaximizeWindow(window);
-                } else if (x >= w - 138)
+                if (x >= w - 92)
+                    toggleMaximize(window);
+                else if (x >= w - 138)
                     SDL_MinimizeWindow(window);
                 else if (x >= w - 280)
                     panel = !panel;
                 return Consumed;
             }
             if (overPanel) {
-                const int row = (y - height() - 12) / 50;
-                if (y >= height() + 12 && row >= 0 && row < 4) {
+                const int displaysTop = height() + 34;
+                if (y >= displaysTop && y < displaysTop + panelRows() * 34 &&
+                    x >= w - 276 && x < w - 276 + 3 * 86) {
+                    const int row = (y - height() - 34) / 34;
+                    const int column = (x - (w - 276)) / 86;
+                    const int display = row * 3 + column + 1;
+                    if (display <= displayCount && display != selectedDisplay) {
+                        selectedDisplay = display;
+                        return DisplayChanged;
+                    }
+                    return Consumed;
+                }
+                const int actionsTop = displaysTop + panelRows() * 34 + 14;
+                const int row = (y - actionsTop) / 40;
+                if (y >= actionsTop && row >= 0 && row < 4) {
                     if (row == 0)
                         toggleFullscreen(window);
                     if (row == 1) {
@@ -119,11 +164,22 @@ class SessionChrome {
         fill(renderer, {25, 26, 10, 10}, {35, 198, 185, 255});
         text(renderer, name, 48, 16, std::min(170, w / 4), {31, 44, 66, 255});
         if (w >= 780) {
-            fill(renderer, {232, 7, 210, height() - 7}, {249, 251, 255, 255});
+            fill(renderer, {232, 7, 180, height() - 7}, {249, 251, 255, 255});
             text(renderer, "\xe8\xbf\x9c\xe7\xa8\x8b\xe6\xa1\x8c\xe9\x9d\xa2", 252, 17, 170,
                  {38, 53, 78, 255});
         }
-        const int timeX = 476;
+        const int quickTabs = quickDisplayTabCount(w);
+        if (quickTabs > 0) {
+            for (int display = 1; display <= quickTabs; ++display) {
+                const int x = 430 + (display - 1) * 84;
+                const bool selected = selectedDisplay == display;
+                fill(renderer, {x, 7, 80, height() - 14},
+                     selected ? SDL_Color{249, 251, 255, 255} : SDL_Color{226, 232, 241, 255});
+                text(renderer, "\xe6\x98\xbe\xe7\xa4\xba\xe5\xb1\x8f " + std::to_string(display),
+                     x + 8, 17, 68, {38, 53, 78, 255});
+            }
+        }
+        const int timeX = 700;
         const SDL_Color signal = connected
                                      ? (quality ? SDL_Color{218, 147, 32, 255} : SDL_Color{16, 173, 131, 255})
                                      : SDL_Color{136, 150, 170, 255};
@@ -148,15 +204,29 @@ class SessionChrome {
         SDL_RenderDrawLine(renderer, w - 30, 21, w - 18, 33);
         SDL_RenderDrawLine(renderer, w - 30, 33, w - 18, 21);
         if (panel) {
-            fill(renderer, {w - 286, height() + 5, 278, 232}, {246, 249, 254, 250});
+            fill(renderer, {w - 286, height() + 5, 278, panelHeight() - 5}, {246, 249, 254, 250});
+            text(renderer, "\xe9\x80\x89\xe6\x8b\xa9\xe8\xbf\x9c\xe7\xab\xaf\xe6\x98\xbe\xe7\xa4\xba\xe5\xb1\x8f",
+                 w - 274, height() + 12, 258, {38, 53, 78, 255});
+            for (int display = 1; display <= displayCount; ++display) {
+                const int column = (display - 1) % 3;
+                const int row = (display - 1) / 3;
+                const int x = w - 276 + column * 86;
+                const int y = height() + 34 + row * 34;
+                fill(renderer, {x, y, 80, 28},
+                     selectedDisplay == display ? SDL_Color{208, 221, 244, 255}
+                                                : SDL_Color{235, 240, 248, 255});
+                text(renderer, "\xe6\x98\xbe\xe7\xa4\xba\xe5\xb1\x8f " + std::to_string(display),
+                     x + 5, y + 2, 72, {38, 53, 78, 255});
+            }
             const char *actions[] = {
                 "\xe5\x88\x87\xe6\x8d\xa2\xe5\x85\xa8\xe5\xb1\x8f",
                 muted ? "\xe6\x81\xa2\xe5\xa4\x8d\xe5\xa3\xb0\xe9\x9f\xb3" : "\xe9\x9d\x99\xe9\x9f\xb3",
                 performance ? "\xe9\x9a\x90\xe8\x97\x8f\xe6\x80\xa7\xe8\x83\xbd\xe4\xbf\xa1\xe6\x81\xaf"
                             : "\xe6\x98\xbe\xe7\xa4\xba\xe6\x80\xa7\xe8\x83\xbd\xe4\xbf\xa1\xe6\x81\xaf",
                 "\xe6\x96\xad\xe5\xbc\x80\xe8\xbf\x9e\xe6\x8e\xa5"};
+            const int actionsTop = height() + 34 + panelRows() * 34 + 14;
             for (int i = 0; i < 4; ++i)
-                text(renderer, actions[i], w - 263, height() + 26 + i * 50, 230,
+                text(renderer, actions[i], w - 263, actionsTop + i * 40, 230,
                      i == 3 ? SDL_Color{195, 65, 77, 255} : SDL_Color{38, 53, 78, 255});
         }
         if (performance) {
@@ -192,18 +262,56 @@ class SessionChrome {
                                                 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
             throw std::runtime_error(std::string("Cannot change session fullscreen mode: ") + SDL_GetError());
     }
+    static void toggleMaximize(SDL_Window *window) {
+        const auto flags = SDL_GetWindowFlags(window);
+        if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)
+            toggleFullscreen(window);
+        else {
+#ifdef _WIN32
+            SDL_SysWMinfo info{};
+            SDL_VERSION(&info.version);
+            if (!SDL_GetWindowWMInfo(window, &info))
+                throw std::runtime_error(std::string("Cannot access session window state: ") + SDL_GetError());
+            if (IsZoomed(info.info.win.window))
+                SDL_RestoreWindow(window);
+            else
+                SDL_MaximizeWindow(window);
+#else
+            if (flags & SDL_WINDOW_MAXIMIZED)
+                SDL_RestoreWindow(window);
+            else
+                SDL_MaximizeWindow(window);
+#endif
+        }
+    }
     static void fill(SDL_Renderer *renderer, SDL_Rect rect, SDL_Color color) {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
         SDL_RenderFillRect(renderer, &rect);
     }
 #ifdef _WIN32
+    SDL_Window *window_ = nullptr;
+
+    static LRESULT CALLBACK windowSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+                                               UINT_PTR subclassId, DWORD_PTR data) {
+        auto *chrome = reinterpret_cast<SessionChrome *>(data);
+        if (message == WM_NCDESTROY) {
+            RemoveWindowSubclass(window, windowSubclassProc, subclassId);
+            return DefSubclassProc(window, message, wParam, lParam);
+        }
+        if (message == WM_NCLBUTTONDBLCLK && wParam == HTCAPTION) {
+            toggleMaximize(chrome->window_);
+            return 0;
+        }
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
     struct Label {
         SDL_Texture *texture;
         int width, height;
     };
     std::map<std::string, Label> labels;
-    static SDL_HitTestResult SDLCALL hitTest(SDL_Window *window, const SDL_Point *point, void *) {
+    static SDL_HitTestResult SDLCALL hitTest(SDL_Window *window, const SDL_Point *point, void *data) {
         int w, h;
         SDL_GetWindowSize(window, &w, &h);
         if (!(SDL_GetWindowFlags(window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
@@ -226,7 +334,12 @@ class SessionChrome {
             if (bottom)
                 return SDL_HITTEST_RESIZE_BOTTOM;
         }
-        return point->y < 54 && point->x < w - 280 ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
+        const auto *chrome = static_cast<SessionChrome *>(data);
+        const int quickTabs = chrome ? chrome->quickDisplayTabCount(w) : 0;
+        const bool overDisplayTabs =
+            quickTabs > 0 && point->x >= 430 && point->x < 430 + quickTabs * 84;
+        return point->y < 54 && point->x < w - 280 && !overDisplayTabs ? SDL_HITTEST_DRAGGABLE
+                                                                        : SDL_HITTEST_NORMAL;
     }
 #endif
     void text(SDL_Renderer *renderer, const std::string &value, int x, int y, int maxWidth, SDL_Color color) {

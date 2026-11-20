@@ -31,6 +31,7 @@ async function main() {
         selfTestSeconds: 30,
         decoder: "software",
         deviceName: "Native UI test (synthetic)",
+        displayCount: 4,
       })}\n`,
     );
     const deadline = Date.now() + 10000;
@@ -62,6 +63,13 @@ async function main() {
       clicks.some((entry) => entry.fullscreen),
       "Fullscreen must activate after real click",
     );
+    assert.deepEqual(
+      clicks
+        .filter((entry) => entry.action === 4)
+        .map((entry) => entry.display),
+      [4, 2, 3],
+      "Monitor grid and quick tabs must select screens 4, 2 and 3",
+    );
     assert.equal(
       clicks.at(-1).fullscreen,
       false,
@@ -71,6 +79,8 @@ async function main() {
       performance: true,
       panel: false,
       muted: false,
+      display: 3,
+      displayCount: 4,
     });
     await fs.writeFile(
       path.join(output, "result.json"),
@@ -80,6 +90,8 @@ async function main() {
             "Synthetic H.264 and Opus; real native SDL window, no VM/network",
           actualClicks: [
             "Open control center",
+            "Select display 4 in the monitor grid",
+            "Select displays 2 and 3 from title-bar tabs",
             "Mute",
             "Unmute",
             "Enter fullscreen",

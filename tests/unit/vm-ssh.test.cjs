@@ -8,12 +8,15 @@ const { test } = require("node:test");
 const bundle = path.resolve("vm-ssh-setup");
 const script = path.join(bundle, "Enable-VmSsh.ps1");
 const publicKey = path.join(bundle, "solunaremote-vm-v2.pub");
+const prepareBundle = path.join(bundle, "Prepare-Host.ps1");
 const windowsOnly = { skip: process.platform !== "win32" };
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
 
 test("VM SSH bundle contains all setup resources and no private key", () => {
   const files = [
     "Enable-VmSsh.ps1",
+    "PREPARE-HOST.bat",
+    "Prepare-Host.ps1",
     "README.txt",
     "START.bat",
     "Start-Setup.ps1",
@@ -57,13 +60,93 @@ function preview(address, key = publicKey) {
 }
 
 test("VM SSH script parses with Windows PowerShell", windowsOnly, () => {
-  for (const file of [script, path.join(bundle, "Start-Setup.ps1")]) {
+  for (const file of [
+    script,
+    path.join(bundle, "Start-Setup.ps1"),
+    prepareBundle,
+  ]) {
     const result = powershell(
       `$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile(${quote(file)}, [ref]$tokens, [ref]$errors); if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }`,
     );
     assert.equal(result.status, 0, result.stderr);
   }
 });
+
+test("VM launcher requests elevation and reports UAC failures", () => {
+  const launcher = fs.readFileSync(
+    path.join(bundle, "Start-Setup.ps1"),
+    "utf8",
+  );
+  const bat = fs.readFileSync(path.join(bundle, "START.bat"), "utf8");
+  assert.match(bat, /-File "%~dp0Start-Setup\.ps1"/);
+  assert.match(launcher, /-Verb RunAs -Wait -PassThru/);
+  assert.match(launcher, /if \(\$process\.ExitCode -ne 0\)/);
+  assert.match(launcher, /exit \$result/);
+});
+
+test(
+  "Host preparation creates a protected key and public-only VM bundle",
+  windowsOnly,
+  () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "VM's bundle "));
+    const keys = path.join(directory, "keys");
+    const staged = path.join(directory, "setup");
+    fs.mkdirSync(keys);
+    fs.cpSync(bundle, staged, { recursive: true });
+    try {
+      const oldPublicKey = fs.readFileSync(
+        path.join(staged, "solunaremote-vm-v2.pub"),
+        "utf8",
+      );
+      const result = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          path.join(staged, "Prepare-Host.ps1"),
+          "-KeyRoot",
+          keys,
+          "-NoPassphrase",
+        ],
+        { encoding: "utf8", timeout: 30000 },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      const keyDirectory = path.join(keys, fs.readdirSync(keys)[0]);
+      const privateKey = path.join(keyDirectory, "id_ed25519");
+      const stagedKey = path.join(staged, "solunaremote-vm-v2.pub");
+      assert.ok(fs.existsSync(privateKey));
+      assert.equal(
+        fs.readFileSync(stagedKey, "utf8"),
+        fs.readFileSync(`${privateKey}.pub`, "utf8"),
+      );
+      assert.equal(
+        fs.readFileSync(path.join(keyDirectory, "previous-bundle.pub"), "utf8"),
+        oldPublicKey,
+      );
+      assert.deepEqual(fs.readdirSync(staged).sort(), [
+        "Enable-VmSsh.ps1",
+        "PREPARE-HOST.bat",
+        "Prepare-Host.ps1",
+        "README.txt",
+        "START.bat",
+        "Start-Setup.ps1",
+        "settings.json",
+        "solunaremote-vm-v2.pub",
+        "vm-deploy.pub",
+      ]);
+      const check = powershell(
+        `$acl = Get-Acl -LiteralPath ${quote(keyDirectory)}; if (-not $acl.AreAccessRulesProtected) { throw 'Key directory inherits permissions' }; $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])); if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'Unexpected key directory permissions' }; & ${quote(path.join(staged, "Start-Setup.ps1"))} -WhatIf`,
+      );
+      assert.equal(check.status, 0, check.stderr);
+      assert.match(check.stdout, /172\.22\.96\.1/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "Host-key repair sets protected admin ownership and SYSTEM access without changing keys",

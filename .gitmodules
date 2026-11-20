@@ -1,0 +1,3 @@
+[submodule "third-party/Sunshine"]
+	path = third-party/Sunshine
+	url = https://github.com/SunshineStream/Sunshine.git

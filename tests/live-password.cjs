@@ -1,13 +1,13 @@
 // Opt-in: real VM desktop app behind an authenticated, loopback-only SSH CDP tunnel.
 const assert = require("node:assert/strict");
-const { _electron, chromium, expect } = require("@playwright/test");
+const { chromium, expect } = require("@playwright/test");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
-const { DEFAULT_SETTINGS } = require("../app/core/validation.cjs");
+const { launchTauri } = require("./tauri-launch.cjs");
 
 async function nativeEvidence(
   playerPid,
@@ -27,6 +27,7 @@ public static class LiveWindow {
  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT rect);
+ [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr window);
  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(System.Drawing.Point point);
  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
@@ -80,13 +81,15 @@ Start-Sleep -Milliseconds 300
 `
     : ""
 }
-foreach ($key in 49..54) {
- if ([LiveWindow]::GetForegroundWindow() -ne $window) { throw 'Focus changed; no further test keys sent.' }
- $scan = [byte][LiveWindow]::MapVirtualKey($key,0)
- [LiveWindow]::keybd_event([byte]$key,$scan,0,[UIntPtr]::Zero)
- Start-Sleep -Milliseconds 300
- [LiveWindow]::keybd_event([byte]$key,$scan,2,[UIntPtr]::Zero)
- Start-Sleep -Milliseconds 300
+if (${remoteTarget ? "$true" : "$false"}) {
+ foreach ($key in 49..54) {
+  if ([LiveWindow]::GetForegroundWindow() -ne $window) { throw 'Focus changed; no further test keys sent.' }
+  $scan = [byte][LiveWindow]::MapVirtualKey($key,0)
+  [LiveWindow]::keybd_event([byte]$key,$scan,0,[UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 300
+  [LiveWindow]::keybd_event([byte]$key,$scan,2,[UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 300
+ }
 }
 Start-Sleep -Milliseconds 800
 $rect = New-Object LiveWindow+RECT
@@ -108,6 +111,18 @@ function ClickOwned([int]$x,[int]$y) {
  [LiveWindow]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
  Start-Sleep -Milliseconds 250
 }
+function DoubleClickOwned([int]$x,[int]$y) {
+ $point = New-Object Drawing.Point($x,$y)
+ [System.Windows.Forms.Cursor]::Position = $point
+ Start-Sleep -Milliseconds 100
+ if ([LiveWindow]::WindowFromPoint($point) -ne $window) { throw 'Session title bar is obscured; no double-click sent.' }
+ [LiveWindow]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
+ [LiveWindow]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+ Start-Sleep -Milliseconds 90
+ [LiveWindow]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
+ [LiveWindow]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+ Start-Sleep -Milliseconds 300
+}
 function CaptureOwned([string]$path) {
  $image = New-Object Drawing.Bitmap(($rect.Right-$rect.Left),($rect.Bottom-$rect.Top))
  $canvas = [Drawing.Graphics]::FromImage($image)
@@ -122,17 +137,25 @@ function CaptureOwned([string]$path) {
 ${
   extendedControls
     ? `
+if ([LiveWindow]::IsZoomed($window)) { throw 'Native UI test must start with a restored window.' }
+DoubleClickOwned ($rect.Left+300) ($rect.Top+27)
+if (-not [LiveWindow]::IsZoomed($window)) { throw 'Title-bar double-click did not maximize the window.' }
+DoubleClickOwned ($rect.Left+300) ($rect.Top+27)
+if ([LiveWindow]::IsZoomed($window)) { throw 'Title-bar double-click did not restore the window.' }
 ClickOwned ($rect.Right-215) ($rect.Top+27)
 CaptureOwned '${path.join(path.dirname(output), "native-control-center.png").replaceAll("'", "''")}'
-ClickOwned ($rect.Right-170) ($rect.Top+141)
+ClickOwned ($rect.Right-264) ($rect.Top+136)
+ClickOwned ($rect.Left+554) ($rect.Top+27)
+ClickOwned ($rect.Left+638) ($rect.Top+27)
+ClickOwned ($rect.Right-170) ($rect.Top+230)
 CaptureOwned '${path.join(path.dirname(output), "native-muted.png").replaceAll("'", "''")}'
-ClickOwned ($rect.Right-170) ($rect.Top+141)
-ClickOwned ($rect.Right-170) ($rect.Top+91)
+ClickOwned ($rect.Right-170) ($rect.Top+230)
+ClickOwned ($rect.Right-170) ($rect.Top+190)
 if (-not [LiveWindow]::GetWindowRect($window,[ref]$rect)) { throw 'Cannot get fullscreen window bounds.' }
 CaptureOwned '${path.join(path.dirname(output), "native-fullscreen.png").replaceAll("'", "''")}'
-ClickOwned ($rect.Right-170) ($rect.Top+91)
+ClickOwned ($rect.Right-170) ($rect.Top+190)
 if (-not [LiveWindow]::GetWindowRect($window,[ref]$rect)) { throw 'Cannot get restored window bounds.' }
-ClickOwned ($rect.Right-170) ($rect.Top+191)
+ClickOwned ($rect.Right-170) ($rect.Top+270)
 ClickOwned ($rect.Right-215) ($rect.Top+27)
 CaptureOwned '${path.join(path.dirname(output), "native-performance.png").replaceAll("'", "''")}'
 ClickOwned ($rect.Right-23) ($rect.Top+27)
@@ -163,6 +186,37 @@ Write-Output 'Captured native rendered window and exercised owned session contro
   console.log(result.stdout.trim());
 }
 
+async function nativePlayerPid(parentPid) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$processes = @(Get-CimInstance Win32_Process)
+$owned = [System.Collections.Generic.HashSet[int]]::new()
+[void]$owned.Add(${parentPid})
+do {
+ $changed = $false
+ foreach ($process in $processes) {
+  if ($owned.Contains([int]$process.ParentProcessId) -and $owned.Add([int]$process.ProcessId)) { $changed = $true }
+ }
+} while ($changed)
+$players = @($processes | Where-Object { $_.Name -eq 'soluna-stream.exe' -and $owned.Contains([int]$_.ProcessId) })
+if ($players.Count -ne 1) { throw "Expected one owned soluna-stream.exe; found $($players.Count)." }
+Write-Output $players[0].ProcessId
+`;
+  const result = await promisify(execFile)(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    { windowsHide: true, timeout: 15000 },
+  );
+  const pid = Number(result.stdout.trim());
+  if (!Number.isSafeInteger(pid) || pid < 1)
+    throw new Error("Could not identify the owned native player process.");
+  return pid;
+}
+
 async function main() {
   const endpoint = process.argv[2];
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint ?? ""))
@@ -170,15 +224,17 @@ async function main() {
   const profile = await fs.mkdtemp(
     path.join(os.tmpdir(), "lan-live-password-"),
   );
+  const userData = path.join(profile, "appdata", "SolunaRemote");
   const output = path.resolve("test-results", "live-password");
   await fs.mkdir(output, { recursive: true });
+  await fs.mkdir(userData, { recursive: true });
   await fs.writeFile(
-    path.join(profile, "devices.json"),
+    path.join(userData, "devices.json"),
     JSON.stringify({
       version: 1,
       devices: [],
       settings: {
-        ...DEFAULT_SETTINGS,
+        moonlightPath: "",
         resolution: "1280x720",
         fps: 30,
         bitrate: 4000,
@@ -194,19 +250,23 @@ async function main() {
     const websocket = new URL(info.webSocketDebuggerUrl);
     websocket.host = new URL(endpoint).host;
     remote = await chromium.connectOverCDP(websocket.href);
-    hostPage = remote
-      .contexts()[0]
-      .pages()
-      .find((entry) => entry.url().endsWith("index.html"));
+    for (const candidate of remote
+      .contexts()
+      .flatMap((context) => context.pages())) {
+      if (
+        await candidate
+          .evaluate(() => typeof window.lan?.call === "function")
+          .catch(() => false)
+      ) {
+        hostPage = candidate;
+        break;
+      }
+    }
     assert.ok(hostPage);
     await hostPage.evaluate(() => window.lan.call("hostStop"));
+    await hostPage.locator("#local-password").fill(password);
     await hostPage
-      .getByRole("button", { name: "本机共享", exact: true })
-      .click();
-    await hostPage.getByLabel("共享网卡").selectOption("172.22.98.13");
-    await hostPage.getByLabel("本机访问密码").fill(password);
-    await hostPage
-      .getByRole("button", { name: "保存访问密码", exact: true })
+      .getByRole("button", { name: "设置固定密码", exact: true })
       .click();
     await expect
       .poll(
@@ -215,10 +275,10 @@ async function main() {
             .passwordConfigured,
       )
       .toBe(true);
-    const code = await hostPage.locator("#host-device-code").textContent();
-    assert.match(code, /^\d{12}$/);
+    const code = await hostPage.locator(".device-code").textContent();
+    assert.match(code, /^\d{9}$/);
     await hostPage
-      .getByRole("button", { name: "开启本机共享", exact: true })
+      .getByRole("button", { name: "允许远程协助", exact: true })
       .click();
     await expect
       .poll(
@@ -234,32 +294,28 @@ async function main() {
             .listening,
       )
       .toBe(true);
-    await hostPage
-      .getByRole("button", { name: "本机共享", exact: true })
-      .click();
     await hostPage.screenshot({
       path: path.join(output, "vm-integrated-host.png"),
     });
     console.log(
       "Integrated VM host ready; device password configured through actual UI.",
     );
-    local = await _electron.launch({
-      executablePath: path.resolve(
-        "release",
-        "win-unpacked",
-        "SolunaRemote.exe",
+    local = await launchTauri(
+      path.resolve(
+        process.argv[3] ||
+          path.join(
+            "release",
+            `SolunaRemote-${require("../package.json").version}-windows-x64-portable`,
+            "SolunaRemote.exe",
+          ),
       ),
-      args: [`--user-data-dir=${profile}`],
-    });
-    page = await local.firstWindow();
-    await page
-      .getByRole("button", { name: "设备码连接", exact: true })
-      .first()
-      .click();
+      profile,
+    );
+    page = local.page;
     const form = page.locator("#connect-form");
-    await form.getByLabel("设备码", { exact: true }).fill(code);
+    await form.locator("#partner-code").fill(code);
     await form
-      .getByLabel("访问密码", { exact: true })
+      .locator("#partner-password")
       .fill("incorrect-live-test-password");
     await form.getByRole("button", { name: "连接", exact: true }).click();
     await expect(page.locator("#connect-error")).toContainText("密码验证失败", {
@@ -270,11 +326,8 @@ async function main() {
       null,
     );
     console.log("Actual wrong-password attempt rejected before streaming.");
-    await form.getByLabel("访问密码", { exact: true }).fill(password);
+    await form.locator("#partner-password").fill(password);
     await form.getByRole("button", { name: "连接", exact: true }).click();
-    await expect(page.locator("#connect-dialog")).not.toBeVisible({
-      timeout: 40000,
-    });
     await expect
       .poll(
         async () =>
@@ -313,11 +366,11 @@ async function main() {
       JSON.stringify(result.stats),
     );
     await hostPage.bringToFront();
-    await hostPage.getByLabel("控制端 IPv4").fill("");
-    await hostPage.getByLabel("控制端 IPv4").focus();
-    const box = await hostPage.getByLabel("控制端 IPv4").boundingBox();
+    await hostPage.locator("#partner-code").fill("");
+    await hostPage.locator("#partner-code").focus();
+    const box = await hostPage.locator("#partner-code").boundingBox();
     const remoteTarget = await hostPage.evaluate((box) => {
-      const input = document.querySelector("#host-client-address");
+      const input = document.querySelector("#partner-code");
       window.remoteMouseEvidence = false;
       const onPointer = (event) => {
         window.remoteMouseDetails = {
@@ -325,7 +378,7 @@ async function main() {
           y: event.clientY,
           id: event.target.id,
         };
-        if (event.target.id === "host-client-address") {
+        if (event.target.id === "partner-code") {
           window.remoteMouseEvidence = true;
           document.removeEventListener("pointerdown", onPointer, true);
         }
@@ -343,24 +396,9 @@ async function main() {
       remoteTarget.width / remoteTarget.height < 1,
       "VM test requires known portrait pillarbox geometry",
     );
-    const players = await local.evaluate(() =>
-      process
-        ._getActiveHandles()
-        .filter(
-          (entry) =>
-            entry.constructor.name === "ChildProcess" &&
-            entry.spawnfile?.endsWith("soluna-stream.exe") &&
-            entry.exitCode === null,
-        )
-        .map((entry) => entry.pid),
-    );
-    assert.equal(
-      players.length,
-      1,
-      "Exactly one tracked native player must be running",
-    );
+    const playerPid = await nativePlayerPid(local.launcher.pid);
     await nativeEvidence(
-      players[0],
+      playerPid,
       path.join(output, "native-live-desktop.png"),
       false,
       remoteTarget,
@@ -376,7 +414,7 @@ async function main() {
             ?.keyboardEvents ?? 0,
       )
       .toBeGreaterThanOrEqual(12);
-    await expect(hostPage.getByLabel("控制端 IPv4")).toHaveValue("123456", {
+    await expect(hostPage.locator("#partner-code")).toHaveValue("123456", {
       timeout: 5000,
     });
     assert.equal(

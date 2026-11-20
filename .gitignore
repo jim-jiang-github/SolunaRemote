@@ -156,6 +156,8 @@ native/.tools/
 native/build/
 native/bin/
 host/bin/
+host/bin-macos/
+host/.sunshine-macos-*/
 /vm-ssh-setup
 /src-tauri/resources/
 /src-tauri/target/

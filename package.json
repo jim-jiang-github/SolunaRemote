@@ -3,79 +3,33 @@
   "version": "0.4.0",
   "description": "LAN-only Tauri desktop remote with integrated Sunshine host and moonlight-common-c client",
   "private": true,
-  "main": "app/main.cjs",
   "author": "Jim Jiang",
   "scripts": {
     "start": "npm run start:tauri",
     "start:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri.ps1 -Mode dev",
-    "start:electron": "electron .",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
     "prepare:host": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-host.ps1",
+    "prepare:host:macos": "node scripts/prepare-host-macos.cjs",
+    "prepare:tauri:macos": "node scripts/prepare-tauri-macos.cjs",
+    "start:tauri:macos": "node scripts/tauri-macos.cjs dev",
+    "dist:tauri:macos": "node scripts/tauri-macos.cjs build",
     "test:native": "node tests/native-smoke.cjs",
     "test:tauri": "node tests/tauri-smoke.cjs",
-    "benchmark:desktop": "node tests/desktop-compare.cjs",
+    "test:portable": "node tests/packaged-smoke.cjs",
     "prepack": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
     "predist": "node tests/native-smoke.cjs --check-build && node scripts/check-host.cjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "test": "node --test tests/unit/*.test.cjs",
-    "pretest:e2e": "node -e \"require('electron')\"",
-    "test:e2e": "playwright test",
-    "pack": "electron-builder --dir",
+    "test": "node --test tests/unit/*.test.cjs && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-rust.ps1",
     "dist": "npm run dist:tauri",
     "dist:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri.ps1 -Mode build",
-    "dist:electron": "electron-builder --win portable"
-  },
-  "dependencies": {
-    "bonjour-service": "1.4.4",
-    "fast-xml-parser": "5.12.0"
+    "dist:msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-msix.ps1"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
-    "electron": "45.3.1",
-    "electron-builder": "26.18.0",
+    "@tauri-apps/cli": "2.12.4",
     "eslint": "^10.0.0",
     "prettier": "^3.0.0"
-  },
-  "build": {
-    "appId": "local.solunaremote.desktop",
-    "productName": "SolunaRemote",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "app/**/*",
-      "package.json"
-    ],
-    "asar": true,
-    "extraResources": [
-      {
-        "from": "native/bin",
-        "to": "native",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "host/bin",
-        "to": "host",
-        "filter": [
-          "**/*",
-          "!config/**/*"
-        ]
-      },
-      {
-        "from": "app/host-firewall.ps1",
-        "to": "host-tools/host-firewall.ps1"
-      }
-    ],
-    "win": {
-      "target": "portable",
-      "signExecutable": false
-    },
-    "portable": {
-      "artifactName": "SolunaRemote-${version}-windows-${arch}.${ext}"
-    }
   }
 }
