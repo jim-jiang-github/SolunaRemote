@@ -16,9 +16,9 @@ if ($env:OS -eq 'Windows_NT') {
 Push-Location (Join-Path $root 'src-tauri')
 try {
     if ($Mode -eq 'dev') {
-        cargo tauri dev
+        npx.cmd --no-install tauri dev
     } else {
-        cargo tauri build --bundles nsis
+        npx.cmd --no-install tauri build --bundles nsis
     }
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 } finally {

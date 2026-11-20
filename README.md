@@ -134,7 +134,9 @@ npm run dist:msix -- -IdentityName "<Package/Identity/Name>" -Publisher "<Packag
 #### GitHub Actions 自动提交
 
 `.github\workflows\publish-microsoft-store.yml` 在推送 `vMAJOR.MINOR.PATCH` 格式的 tag 时，
-会构建 x64 MSIX 并提交到 Microsoft Store。例如 `v1.0.3` 会生成包版本 `1.0.3.0`。
+会构建 Windows NSIS 安装程序（`.exe`）、Store MSIX，并分别为 Apple Silicon 和 Intel Mac 构建 DMG；
+这些安装包会作为 GitHub Actions artifacts 保存 30 天。MSIX 会自动提交到 Microsoft Store。
+例如 `v1.0.3` 会生成商店包版本 `1.0.3.0`。
 当前已发布版本为 `1.0.2.0`，因此 tag 必须更高。
 
 在 GitHub 仓库 **Settings > Secrets and variables > Actions** 中添加
@@ -144,6 +146,7 @@ npm run dist:msix -- -IdentityName "<Package/Identity/Name>" -Publisher "<Packag
 
 该流程会提交商店审核；实际上架时间仍由 Microsoft 认证流程决定。Microsoft Store Developer CLI
 当前仅支持免费商品的自动更新。仅在所有需要发布的源代码与构建脚本都已提交后创建并推送 release tag。
+macOS DMG 使用临时签名且不会公证；首次下载打开时，macOS 可能要求用户在系统设置中确认。
 
 商店版不会调用管理员提权或 PowerShell 防火墙脚本。
 MSIX 清单通过 `windows.firewallRules` 为本应用的 TCP 47991 / UDP 5353，

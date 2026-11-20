@@ -1,4 +1,4 @@
-name: Publish Microsoft Store
+name: Build and publish release
 
 on:
   push:
@@ -13,59 +13,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      msix_version: ${{ steps.version.outputs.msix_version }}
+    steps:
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+          else
+            echo "Release tags must use vMAJOR.MINOR.PATCH, for example v1.0.3." >&2
+            exit 1
+          fi
+
+          if (( major == 0 || major > 65535 || minor > 65535 || patch > 65535 )); then
+            echo "The Store package version requires a positive major and components no greater than 65535." >&2
+            exit 1
+          fi
+          if (( major == 1 && minor == 0 && patch <= 2 )); then
+            echo "The release tag must be newer than the currently published Store version 1.0.2.0." >&2
+            exit 1
+          fi
+
+          echo "msix_version=${major}.${minor}.${patch}.0" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: validate-tag
     runs-on: windows-latest
     timeout-minutes: 360
     env:
       STORE_IDENTITY_NAME: 21715JimJiang.SolunaRemote
       STORE_PUBLISHER: CN=637A899D-E295-4D14-92B7-DCA009B34A94
       STORE_PUBLISHER_DISPLAY_NAME: Jim Jiang
-      STORE_PRODUCT_ID: 9N59ZZL73M2B
+      MSIX_VERSION: ${{ needs.validate-tag.outputs.msix_version }}
 
     steps:
       - name: Check out release source
         uses: actions/checkout@v4
 
-      - name: Validate tag and Store credentials
-        shell: pwsh
-        env:
-          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
-          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
-          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-          SELLER_ID: ${{ secrets.SELLER_ID }}
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          if ($tag -notmatch '^v(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)$') {
-            throw 'Release tags must use vMAJOR.MINOR.PATCH, for example v1.0.3.'
-          }
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
 
-          $parts = @(
-            [int]$Matches['major'],
-            [int]$Matches['minor'],
-            [int]$Matches['patch']
-          )
-          if ($parts[0] -eq 0 -or ($parts | Where-Object { $_ -gt 65535 })) {
-            throw 'The Store package version requires a positive major and components no greater than 65535.'
-          }
-
-          $version = "$($parts[0]).$($parts[1]).$($parts[2]).0"
-          if ([version]$version -le [version]'1.0.2.0') {
-            throw 'The release tag must be newer than the currently published Store version 1.0.2.0.'
-          }
-          "MSIX_VERSION=$version" >> $env:GITHUB_ENV
-
-          $requiredSecrets = @(
-            'AZURE_AD_TENANT_ID',
-            'AZURE_AD_APPLICATION_CLIENT_ID',
-            'AZURE_AD_APPLICATION_SECRET',
-            'SELLER_ID'
-          )
-          $missingSecrets = @($requiredSecrets | Where-Object {
-            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
-          })
-          if ($missingSecrets.Count -gt 0) {
-            throw "Configure these GitHub Actions secrets before tagging a release: $($missingSecrets -join ', ')."
-          }
+      - name: Install Node.js dependencies
+        run: npm ci
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -79,6 +78,27 @@ jobs:
       - name: Prepare Sunshine host
         shell: pwsh
         run: ./scripts/prepare-host.ps1
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          npm run dist:tauri
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows installer build failed.'
+          }
+
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected one NSIS installer, found $($installers.Count)."
+          }
+
+      - name: Save Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SolunaRemote-${{ github.ref_name }}-windows-exe
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Build Store MSIX
         shell: pwsh
@@ -95,7 +115,6 @@ jobs:
           if ($packages.Count -ne 1) {
             throw "Expected one MSIX package, found $($packages.Count)."
           }
-          "MSIX_PATH=$($packages[0].FullName)" >> $env:GITHUB_ENV
 
       - name: Save MSIX artifact
         uses: actions/upload-artifact@v4
@@ -104,6 +123,124 @@ jobs:
           path: ${{ runner.temp }}/SolunaRemote-msix-store/*.msix
           if-no-files-found: error
           retention-days: 30
+
+  build-macos:
+    needs: validate-tag
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x64
+    steps:
+      - name: Check out release source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install macOS build dependencies
+        run: |
+          brew install --force \
+            boost \
+            cmake \
+            ffmpeg \
+            miniupnpc \
+            nlohmann-json \
+            ninja \
+            openssl@4 \
+            opus \
+            pkgconf \
+            qtbase \
+            qtsvg \
+            sdl2
+
+      - name: Configure Homebrew build paths
+        run: |
+          openssl_prefix="$(brew --prefix openssl@4)"
+          opus_prefix="$(brew --prefix opus)"
+          qt_prefix="$(brew --prefix qtbase)"
+          qtsvg_prefix="$(brew --prefix qtsvg)"
+          ffmpeg_prefix="$(brew --prefix ffmpeg)"
+          sdl_prefix="$(brew --prefix sdl2)"
+          nlohmann_prefix="$(brew --prefix nlohmann-json)"
+
+          echo "OPENSSL_ROOT_DIR=$openssl_prefix" >> "$GITHUB_ENV"
+          echo "Opus_ROOT_DIR=$opus_prefix" >> "$GITHUB_ENV"
+          echo "Qt6_DIR=$qt_prefix/lib/cmake/Qt6" >> "$GITHUB_ENV"
+          echo "Qt6Svg_DIR=$qtsvg_prefix/lib/cmake/Qt6Svg" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$openssl_prefix:$opus_prefix:$qt_prefix:$qtsvg_prefix:$ffmpeg_prefix:$sdl_prefix:$nlohmann_prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig:$opus_prefix/lib/pkgconfig:$openssl_prefix/lib/pkgconfig:$sdl_prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Sunshine host
+        run: npm run prepare:host:macos
+
+      - name: Build macOS disk image
+        run: npm run dist:tauri:macos
+
+      - name: Save macOS disk image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SolunaRemote-${{ github.ref_name }}-dmg-${{ matrix.architecture }}
+          path: src-tauri/target/release/bundle/dmg/SolunaRemote_*_${{ matrix.architecture }}.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-store:
+    needs: build-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      STORE_PRODUCT_ID: 9N59ZZL73M2B
+
+    steps:
+      - name: Download Store MSIX artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SolunaRemote-${{ github.ref_name }}-msix
+          path: ${{ runner.temp }}/SolunaRemote-msix-store
+
+      - name: Validate Store credentials
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          $requiredSecrets = @(
+            'AZURE_AD_TENANT_ID',
+            'AZURE_AD_APPLICATION_CLIENT_ID',
+            'AZURE_AD_APPLICATION_SECRET',
+            'SELLER_ID'
+          )
+          $missingSecrets = @($requiredSecrets | Where-Object {
+            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          })
+          if ($missingSecrets.Count -gt 0) {
+            throw "Configure these GitHub Actions secrets before tagging a release: $($missingSecrets -join ', ')."
+          }
+
+          $packages = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'SolunaRemote-msix-store') -Filter '*.msix' -File)
+          if ($packages.Count -ne 1) {
+            throw "Expected one MSIX package, found $($packages.Count)."
+          }
+          "MSIX_PATH=$($packages[0].FullName)" >> $env:GITHUB_ENV
 
       - name: Set up Microsoft Store CLI
         uses: microsoft/microsoft-store-apppublisher@v1.1
