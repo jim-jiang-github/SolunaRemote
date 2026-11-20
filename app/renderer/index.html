@@ -400,6 +400,26 @@
             </button>
           </div>
         </div>
+        <div
+          id="remote-control-alert"
+          class="remote-control-alert"
+          role="alert"
+          hidden
+        >
+          <div>
+            <strong>有人正在远程控制本机</strong>
+            <span id="remote-control-alert-detail"
+              >你可以立即断开远程连接。</span
+            >
+          </div>
+          <button
+            type="button"
+            class="button danger"
+            data-action="disconnect-remote"
+          >
+            断开远程并停止共享
+          </button>
+        </div>
         <div id="content" class="content" aria-live="polite">
           <div class="empty-state" role="status">正在启动 SolunaRemote…</div>
         </div>

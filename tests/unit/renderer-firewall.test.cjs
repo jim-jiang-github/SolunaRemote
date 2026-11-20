@@ -42,6 +42,7 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
       firewallManagedByPackage,
       phase: "stopped",
       available: true,
+      remoteActive: false,
       access: { passwordConfigured: true, code: "123456789" },
     },
   };
@@ -50,6 +51,12 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
     failure: null,
     check: null,
     onState: null,
+    simulateRemoteControl() {
+      backend.onState({
+        ...snapshot,
+        host: { ...snapshot.host, phase: "running", remoteActive: true },
+      });
+    },
     async call(method) {
       calls.push(method);
       if (method === "state") return snapshot;
@@ -58,6 +65,11 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
       if (backend.failure) throw new Error(backend.failure);
       if (method === "hostStart") {
         snapshot.host.phase = "running";
+        backend.onState(snapshot);
+      }
+      if (method === "hostStop") {
+        snapshot.host.phase = "stopped";
+        snapshot.host.remoteActive = false;
         backend.onState(snapshot);
       }
     },
@@ -94,6 +106,20 @@ async function setup(platform = "macos", firewallManagedByPackage = false) {
     handlers.click({ target: { closest: () => ({ dataset }) } });
   return { node, calls, backend, click };
 }
+
+test("active remote control displays an alert and can be disconnected", async () => {
+  const { backend, calls, node, click } = await setup();
+  backend.simulateRemoteControl();
+
+  assert.equal(node("#remote-control-alert").hidden, false);
+  assert.equal(node("#toast").textContent, "有人正在远程控制本机。");
+
+  await click({ action: "disconnect-remote" });
+  assert.ok(calls.includes("hostStop"));
+  assert.equal((await backend.call("state")).host.phase, "stopped");
+  assert.equal(node("#remote-control-alert").hidden, true);
+  assert.equal(node("#toast").textContent, "已断开远程连接并停止本机共享。");
+});
 
 test("macOS sharing explains authorization before opening settings or starting", async () => {
   const { click, node, calls, backend } = await setup();

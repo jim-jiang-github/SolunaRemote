@@ -84,6 +84,8 @@
       console.error("Ignoring invalid application state snapshot:", next);
       return false;
     }
+    const remoteBecameActive =
+      next.host?.remoteActive === true && state?.host?.remoteActive !== true;
     const active = document.activeElement;
     const activeId = active?.id;
     const selection =
@@ -91,6 +93,15 @@
         ? [active.selectionStart, active.selectionEnd]
         : null;
     state = next;
+    const remoteAlert = document.querySelector("#remote-control-alert");
+    const remoteActive = state.host?.remoteActive === true;
+    const remoteStatusError = state.host?.remoteStatusError;
+    remoteAlert.hidden = !remoteActive && !remoteStatusError;
+    document.querySelector("#remote-control-alert-detail").textContent =
+      remoteStatusError && !remoteActive
+        ? "无法确认远程连接状态；如有疑虑，请立即停止本机共享。"
+        : "你可以立即断开远程连接。";
+    if (remoteBecameActive) notify("有人正在远程控制本机。");
     document.documentElement.dataset.appReady = "true";
     if (selectedId && !selected()) {
       selectedId = null;
@@ -448,6 +459,22 @@
     "firewall-recheck": startHost,
     "firewall-settings": () => window.lan.call("openFirewallSettings"),
     "host-stop": () => window.lan.call("hostStop"),
+    "disconnect-remote": async () => {
+      if (hostTogglePending) return;
+      hostTogglePending = true;
+      const disconnectButton = document.querySelector(
+        '[data-action="disconnect-remote"]',
+      );
+      disconnectButton.disabled = true;
+      try {
+        await window.lan.call("hostStop");
+        notify("已断开远程连接并停止本机共享。");
+      } finally {
+        hostTogglePending = false;
+        disconnectButton.disabled = false;
+        await window.lan.call("state").then(applyState);
+      }
+    },
     "host-settings": () => window.lan.call("openHostSettings"),
     "host-accessibility-settings": () =>
       window.lan.call("openHostAccessibilitySettings"),

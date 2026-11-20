@@ -403,6 +403,29 @@ button:not(:disabled):active {
   overflow: auto;
   padding: 20px 25px 23px;
 }
+.remote-control-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 12px 23px 0;
+  padding: 11px 14px;
+  border: 1px solid #f0c1ba;
+  border-radius: 9px;
+  background: #fff0ed;
+  color: #a4392e;
+}
+.remote-control-alert > div {
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+}
+.remote-control-alert strong {
+  font-size: 12px;
+}
+.remote-control-alert .button {
+  flex-shrink: 0;
+}
 .statusbar {
   height: 24px;
   flex-shrink: 0;
@@ -1735,6 +1758,11 @@ dialog::backdrop {
   background: #121d30;
   border-color: #26344a;
   color: #a7b5ca;
+}
+[data-icon-theme="dark"] .remote-control-alert {
+  border-color: #78413e;
+  background: #382322;
+  color: #ffc0b8;
 }
 [data-icon-theme="dark"] .breadcrumb,
 [data-icon-theme="dark"] .page-heading h1,

@@ -142,6 +142,14 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
         .host
         .lock()
         .map_err(|_| "Sunshine 主机状态不可用。".to_string())?;
+    let (remote_active, remote_status_error) = if host.phase() == "running" {
+        match host.remote_active() {
+            Ok(active) => (Some(active), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (Some(false), None)
+    };
     let client = backend
         .client
         .lock()
@@ -182,6 +190,8 @@ fn backend_snapshot(backend: &Backend) -> Result<Value, String> {
             "available": host.available(),
             "phase": host.phase(),
             "error": host.error(),
+            "remoteActive": remote_active,
+            "remoteStatusError": remote_status_error,
             "pending": [],
             "access": {
                 "code": access.code,

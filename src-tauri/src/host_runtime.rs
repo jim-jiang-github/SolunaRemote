@@ -338,6 +338,17 @@ impl HostRuntime {
         Ok(())
     }
 
+    pub fn remote_active(&self) -> Result<bool, String> {
+        if self.phase != "running" {
+            return Ok(false);
+        }
+        let (status, response) = self.request(MANAGEMENT_PORT, "GET", "/serverinfo", None, true)?;
+        if status != 200 {
+            return Err(format!("无法读取 Sunshine 远程连接状态：HTTP {status}"));
+        }
+        serverinfo_has_active_session(&response)
+    }
+
     pub fn stop(&mut self) -> Result<(), String> {
         self.phase = "stopping".into();
         let result = self.stop_child();
@@ -525,6 +536,19 @@ impl HostRuntime {
     }
 }
 
+fn serverinfo_has_active_session(response: &[u8]) -> Result<bool, String> {
+    let xml =
+        std::str::from_utf8(response).map_err(|_| "Sunshine 返回无效远程连接状态。".to_string())?;
+    let current_game = xml
+        .split_once("<currentgame>")
+        .and_then(|(_, value)| value.split_once("</currentgame>").map(|(value, _)| value))
+        .ok_or_else(|| "Sunshine 返回无效远程连接状态。".to_string())?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "Sunshine 返回无效远程连接状态。".to_string())?;
+    Ok(current_game > 0)
+}
+
 fn decode_chunked(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     let mut cursor = 0;
@@ -566,6 +590,19 @@ mod tests {
     fn management_requests_use_get_for_reads_and_post_for_mutations() {
         assert_eq!(HostRuntime::management_method(None), "GET");
         assert_eq!(HostRuntime::management_method(Some(&json!({}))), "POST");
+    }
+
+    #[test]
+    fn serverinfo_reports_active_remote_desktop_sessions() {
+        assert_eq!(
+            serverinfo_has_active_session(b"<root><currentgame>1</currentgame></root>"),
+            Ok(true)
+        );
+        assert_eq!(
+            serverinfo_has_active_session(b"<root><currentgame>0</currentgame></root>"),
+            Ok(false)
+        );
+        assert!(serverinfo_has_active_session(b"<root></root>").is_err());
     }
 
     #[test]
